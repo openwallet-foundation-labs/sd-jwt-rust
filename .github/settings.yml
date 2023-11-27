@@ -1,0 +1,19 @@
+repository:
+  private: false
+  has_issues: true
+  has_projects: true
+  has_wiki: true
+  has_downloads: true
+  default_branch: main
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: true
+
+branches:
+  - name: main
+    protection:
+      required_status_checks:
+        enforcement_level: everyone
+        strict: true
+        contexts: ["DCO"]
+      enforce_admins: true
