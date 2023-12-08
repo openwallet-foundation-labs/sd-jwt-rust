@@ -22,10 +22,10 @@ Note: the list of dependencies may be changed in the future.
 ## Initial Maintainers
 
 - Sergey Minaev ([Github](https://github.com/jovfer))
-- DSR Corporation Decentralized Systems Team ([Github](https://github.com/orgs/DSRCorporation/teams/decentralized-systems)
+- DSR Corporation Decentralized Systems Team ([Github](https://github.com/orgs/DSRCorporation/teams/decentralized-systems))
 
 ## To Be Completed by Maintainers
-- [ ] Create MAINTAINERS.md file using the [format documented on the TAC site](https://tac.openwallet.foundation/governance/maintainers-file-content/).
+- [x] Create MAINTAINERS.md file using the [format documented on the TAC site](https://tac.openwallet.foundation/governance/maintainers-file-content/).
 - [ ] Create a CONTRIBUTING.md file that documents steps for contributing to the project
 - [ ] Create a CODEOWNERS file
 - [ ] Update the README.md file as necessary
