@@ -27,5 +27,5 @@ Note: the list of dependencies may be changed in the future.
 ## To Be Completed by Maintainers
 - [x] Create MAINTAINERS.md file using the [format documented on the TAC site](https://tac.openwallet.foundation/governance/maintainers-file-content/).
 - [ ] Create a CONTRIBUTING.md file that documents steps for contributing to the project
-- [ ] Create a CODEOWNERS file
+- [X] Create a CODEOWNERS file
 - [ ] Update the README.md file as necessary
