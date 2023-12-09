@@ -144,12 +144,11 @@ impl SDJWTCommon {
     }
 
 
-    fn generate_salt(seed: Option<String>) -> String {
-        if let Some(seed) = seed { //FIXME better mock approach
-            let map = SALTS.lock().unwrap();
-            let salt = map.get(seed.as_str());
+    fn generate_salt(key_for_predefined_salt: Option<String>) -> String {
+        let map = SALTS.lock().unwrap();
 
-            salt.unwrap_or(&"G02NSrQfjFXQ7Io09syzjA".to_string()).to_owned()
+        if let Some(salt) = key_for_predefined_salt.and_then(|key|map.get(&key)) { //FIXME better mock approach
+            salt.clone()
         } else {
             let mut buf = [0u8; 16];
             ThreadRng::default().fill_bytes(&mut buf);
