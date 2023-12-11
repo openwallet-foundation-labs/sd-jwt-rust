@@ -69,7 +69,26 @@ impl<'a> SDJWTClaimsStrategy<'a> {
             Self::Full => Self::Full,
             Self::Partial(sd_keys) => {
                 let next_sd_keys = sd_keys.iter().filter_map(|str| {
-                    str.strip_prefix(key).and_then(|str| str.strip_prefix('.'))
+                    str.strip_prefix(key).as_mut().and_then(|claim| {
+                        if let Some(next_claim) = claim.strip_prefix('.') {
+                            Some(next_claim)
+                        } else if let Some(next_claim) = claim.strip_prefix('[').and_then(|str| str.strip_suffix(']')) {
+                            Some(next_claim)
+                        } else {
+                            // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
+                            // For example: [0].street -> 0.street
+                            if let Some(remainder) = claim.strip_prefix('[') {
+                                *claim = remainder;
+                                let remainder: Vec<&str> = claim.splitn(2, ']').collect();
+                                //FIXME Change to safe impl
+                                *claim = remainder.join("").leak();
+
+                                Some(claim)
+                            } else {
+                                None
+                            }
+                        }
+                    })
                 }).collect();
                 Self::Partial(next_sd_keys)
             }
@@ -170,7 +189,7 @@ impl SDJWTIssuer {
             let subtree = self.create_sd_claims(object, strategy_for_child);
 
             if sd_strategy.sd_for_key(&key) {
-                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree, &self.inner);
+                let disclosure = SDJWTDisclosure::new(None, subtree, &self.inner);
                 claims.push(json!({ SD_LIST_PREFIX: disclosure.hash}));
                 self.all_disclosures.push(disclosure);
             } else {

@@ -4,7 +4,7 @@ use std::time;
 use jsonwebtoken::EncodingKey;
 use serde_json::{json, Map, Value};
 
-use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, SD_DIGESTS_KEY};
+use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, SD_DIGESTS_KEY, SD_LIST_PREFIX};
 use crate::SDJWTCommon;
 
 pub struct SDJWTHolder {
@@ -100,12 +100,13 @@ impl SDJWTHolder {
             let disclosure = self.sd_jwt_engine.hash_to_decoded_disclosure[digest].as_array().unwrap();
             (disclosure[1].as_str().unwrap(), (&disclosure[2], digest))
         }).collect(); //TODO split to 2 maps
-
         for (key_to_disclose, value_to_disclose) in claims_to_disclose {
             match value_to_disclose {
                 Value::Null | Value::Bool(true) | Value::Number(_) | Value::String(_) => { /* disclose without children */ }
-                Value::Array(_) => {
-                    unimplemented!()
+                Value::Array(arr_to_disclose) => {
+                    if let Some(arr) = sd_jwt_claims.get(&key_to_disclose).and_then(Value::as_array) {
+                        hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(&arr, &arr_to_disclose))
+                    }
                 }
                 Value::Object(next_disclosure) if (!next_disclosure.is_empty()) => {
                     let next_sd_jwt_claims = if let Some(next) = sd_jwt_claims.get(&key_to_disclose).and_then(Value::as_object) {
@@ -131,6 +132,24 @@ impl SDJWTHolder {
         hash_to_disclosure
     }
 
+    fn select_disclosures_from_disclosed_list(&self, sd_jwt_claims: &Vec<Value>, claims_to_disclose: &Vec<Value>) -> Vec<String> {
+        let mut hash_to_disclosure: Vec<String> = Vec::new();
+        for (claim_to_disclose, claim) in claims_to_disclose.iter().zip(sd_jwt_claims) {
+            match (claim_to_disclose, claim) {
+                (Value::Bool(true), Value::Object(claim)) => {
+                    if let Some(Value::String(digest)) = claim.get(SD_LIST_PREFIX) {
+                        hash_to_disclosure.push(self.sd_jwt_engine.hash_to_disclosure[digest].to_owned());
+                    }
+                }
+                (Value::Array(new_claims_to_disclose), Value::Array(claim)) => {
+                    self.select_disclosures_from_disclosed_list(claim, new_claims_to_disclose);
+                }
+                _ => {}
+            }
+        }
+
+        return hash_to_disclosure;
+    }
     fn create_key_binding_jwt(
         &mut self,
         nonce: String,
@@ -156,6 +175,7 @@ impl SDJWTHolder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use jsonwebtoken::EncodingKey;
     use serde_json::{json, Map, Value};
     use crate::issuer::SDJWTClaimsStrategy;
@@ -212,5 +232,55 @@ mod tests {
         parts.remove(1);
         let expected = parts.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
         assert_eq!(expected, presentation);
+    }
+
+    #[test]
+    fn create_presentation_for_arrayed_disclosures() {
+        let mut user_claims = json!(
+            {
+              "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+              "name": "Bois",
+              "addresses": [
+                {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+                },
+                {
+                "street_address": "456 Main St",
+                "locality": "Anytown",
+                "region": "NY",
+                "country": "US"
+                }
+              ],
+              "nationalities": [
+                "US",
+                "CA"
+              ]
+            }
+        );
+        let strategy = SDJWTClaimsStrategy::Partial(vec!["$.name", "$.addresses[1]", "$.addresses[1].country", "$.nationalities[0]"]);
+
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let sd_jwt = SDJWTIssuer::issue_sd_jwt(user_claims.clone(), strategy, issuer_key, None, None, false, "compact".to_owned());
+        // Choose what to reveal
+        user_claims["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(false)]);
+        user_claims["nationalities"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
+
+        let issued = sd_jwt.serialized_sd_jwt.clone();
+        println!("{}", issued);
+        let presentation = SDJWTHolder::new(sd_jwt.serialized_sd_jwt, "compact".to_ascii_lowercase()).create_presentation(user_claims.as_object().unwrap().clone(), None, None, None, None);
+        println!("{}", presentation);
+        let mut issued_parts: HashSet<&str> = issued.split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR).collect();
+        issued_parts.remove("");
+
+        let mut revealed_parts: HashSet<&str> = presentation.split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR).collect();
+        revealed_parts.remove("");
+
+        let union: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
+        assert_eq!(union.len(), 3);
+
     }
 }

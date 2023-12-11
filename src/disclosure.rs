@@ -16,7 +16,7 @@ impl SDJWTDisclosure  {
             let raw_b64 = SDJWTCommon::base64url_encode(data.as_bytes());
             (data, raw_b64)
         } else {
-            let data = format!("[{}, {}]", salt, value_str);
+            let data = format!(r#"["{}", {}]"#, salt, value_str);
             let raw_b64 = SDJWTCommon::base64url_encode(data.as_bytes());
             (data, raw_b64)
         };
