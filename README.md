@@ -37,7 +37,7 @@ Please refer to the list, unchecked items are in progress and will be supported 
 - [x] CI pipelines for Ubuntu
 - [ ] Support of multiple hash / sign algorithms
 - [ ] JWT Key Binding support
-- [ ] Selective disclosure of arrays elements
+- [x] Selective disclosure of arrays elements
 - [ ] Extended error handling
 - [ ] Extended CI/CD
 

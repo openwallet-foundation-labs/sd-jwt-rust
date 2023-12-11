@@ -96,7 +96,18 @@ impl SDJWTVerifier {
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 return Ok(sd_jwt_claims.to_owned());
             }
-            Value::Array(_) => { unimplemented!() }
+            Value::Array(arr) => {
+                if arr.is_empty() {
+                    return Err("Array of disclosed claims cannot be empty".to_string());
+                }
+
+                let mut claims = vec![];
+                for value in arr {
+                    let claim = self.unpack_disclosed_claims(value).unwrap();
+                    claims.push(claim);
+                }
+                return Ok(serde_json::to_value(claims).unwrap());
+            }
             Value::Object(obj) => { obj }
         };
 
@@ -109,7 +120,7 @@ impl SDJWTVerifier {
             }
         }
 
-        if let Some(digest_of_disclosures) = nested_sd_jwt_claims[SD_DIGESTS_KEY].as_array() {
+        if let Some(Value::Array(digest_of_disclosures)) = nested_sd_jwt_claims.get(SD_DIGESTS_KEY) {
             self.unpack_from_digests(&mut disclosed_claims, digest_of_disclosures)?;
         }
 
@@ -150,7 +161,7 @@ impl SDJWTVerifier {
 #[cfg(test)]
 mod tests {
     use jsonwebtoken::{DecodingKey, EncodingKey};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use crate::issuer::SDJWTClaimsStrategy;
     use crate::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier};
 
@@ -182,5 +193,53 @@ mod tests {
             DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
         }), None, None, "compact".to_owned()).unwrap().verified_claims;
         assert_eq!(user_claims, verified_claims);
+    }
+
+    #[test]
+    fn verify_arrayed_presentation() {
+        let user_claims = json!(
+            {
+              "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+              "name": "Bois",
+              "iss": "https://example.com/issuer",
+              "iat": 1683000000,
+              "exp": 1883000000,
+              "addresses": [
+                {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+                },
+                {
+                "street_address": "456 Main St",
+                "locality": "Anytown",
+                "region": "NY",
+                "country": "US"
+                }
+              ],
+              "nationalities": [
+                "US",
+                "CA"
+              ]
+            }
+        );
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let strategy = SDJWTClaimsStrategy::Partial(vec!["$.name", "$.addresses[1]", "$.addresses[1].country", "$.nationalities[0]"]);
+        let sd_jwt = SDJWTIssuer::issue_sd_jwt(user_claims.clone(), strategy, issuer_key, None, None, false, "compact".to_owned());
+
+        let mut claims_to_disclose = user_claims.clone();
+        claims_to_disclose["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
+        claims_to_disclose["nationalities"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
+        let presentation = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), "compact".to_owned()).create_presentation(claims_to_disclose.as_object().unwrap().clone(), None, None, None, None);
+
+        let verified_claims = SDJWTVerifier::new(presentation.clone(), Box::new(|_, _| {
+            let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+            DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+        }), None, None, "compact".to_owned()).unwrap().verified_claims;
+
+        assert_eq!(verified_claims["addresses"][0].to_owned(), user_claims["addresses"][0].to_owned());
+        assert!(!verified_claims["addresses"][1].to_owned().get("...").unwrap().to_string().is_empty());
     }
 }
