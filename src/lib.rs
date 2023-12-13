@@ -1,30 +1,27 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
-
-use base64::{Engine, engine::general_purpose};
+use base64::{engine::general_purpose, Engine};
 use lazy_static::lazy_static;
 use rand::prelude::ThreadRng;
 use rand::RngCore;
 use serde_json::{Map, Value};
 use sha2::Digest;
-
+use std::sync::Mutex;
 pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, verifier::SDJWTVerifier};
-
-mod issuer;
-mod verifier;
-mod holder;
 mod disclosure;
+pub mod holder;
+pub mod issuer;
+pub mod verifier;
 
-const DEFAULT_SIGNING_ALG: &str = "ES256";
+pub const DEFAULT_SIGNING_ALG: &str = "ES256";
 const SD_DIGESTS_KEY: &str = "_sd";
 const DIGEST_ALG_KEY: &str = "_sd_alg";
-const DEFAULT_DIGEST_ALG: &str = "sha-256";
+pub const DEFAULT_DIGEST_ALG: &str = "sha-256";
 const SD_LIST_PREFIX: &str = "...";
 const _SD_JWT_TYP_HEADER: &str = "sd+jwt";
 const KB_JWT_TYP_HEADER: &str = "kb+jwt";
 const JWS_KEY_DISCLOSURES: &str = "disclosures";
 const JWS_KEY_KB_JWT: &str = "kb_jwt";
-const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
+pub const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
 const JWT_SEPARATOR: &str = ".";
 
 #[derive(Debug)]
