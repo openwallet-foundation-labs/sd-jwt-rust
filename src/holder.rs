@@ -93,31 +93,40 @@ impl SDJWTHolder {
         claims_to_disclose: Map<String, Value>,
     ) -> Vec<String> {
         let mut hash_to_disclosure = Vec::new();
-
         let default_list = Vec::new();
-        let sd_map: HashMap<&str, (&Value, &str)> = sd_jwt_claims[SD_DIGESTS_KEY].as_array().unwrap_or(&default_list).iter().map(|digest| {
+        let sd_map: HashMap<&str, (&Value, &str)> = sd_jwt_claims.get(SD_DIGESTS_KEY).and_then(Value::as_array).unwrap_or(&default_list).iter().filter_map(|digest| {
             let digest = digest.as_str().unwrap();
-            let disclosure = self.sd_jwt_engine.hash_to_decoded_disclosure[digest].as_array().unwrap();
-            (disclosure[1].as_str().unwrap(), (&disclosure[2], digest))
+            if let Some(Value::Array(disclosure)) = self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest) {
+                return Some((disclosure[1].as_str().unwrap(), (&disclosure[2], digest)));
+            }
+            None
         }).collect(); //TODO split to 2 maps
         for (key_to_disclose, value_to_disclose) in claims_to_disclose {
             match value_to_disclose {
-                Value::Null | Value::Bool(true) | Value::Number(_) | Value::String(_) => { /* disclose without children */ }
-                Value::Array(arr_to_disclose) => {
-                    if let Some(arr) = sd_jwt_claims.get(&key_to_disclose).and_then(Value::as_array) {
-                        hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(&arr, &arr_to_disclose))
+                Value::Bool(true) | Value::Number(_) | Value::String(_) => { /* disclose without children */ }
+                Value::Array(claims_to_disclose) => {
+                    if let Some(sd_jwt_claims) = sd_jwt_claims
+                        .get(&key_to_disclose)
+                        .and_then(Value::as_array)
+                    {
+                        hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(&sd_jwt_claims, &claims_to_disclose))
+                    } else if let Some(sd_jwt_claims) = sd_map
+                        .get(key_to_disclose.as_str())
+                        .and_then(|(sd, _)| sd.as_array())
+                    {
+                        hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(&sd_jwt_claims, &claims_to_disclose))
                     }
                 }
-                Value::Object(next_disclosure) if (!next_disclosure.is_empty()) => {
-                    let next_sd_jwt_claims = if let Some(next) = sd_jwt_claims.get(&key_to_disclose).and_then(Value::as_object) {
+                Value::Object(claims_to_disclose) if (!claims_to_disclose.is_empty()) => {
+                    let sd_jwt_claims = if let Some(next) = sd_jwt_claims.get(&key_to_disclose).and_then(Value::as_object) {
                         next
                     } else {
                         sd_map[key_to_disclose.as_str()].0.as_object().unwrap()
                     };
-                    hash_to_disclosure.append(&mut self.select_disclosures(next_sd_jwt_claims, next_disclosure));
+                    hash_to_disclosure.append(&mut self.select_disclosures(sd_jwt_claims, claims_to_disclose));
                 }
                 Value::Object(_) => { /* disclose without children */ }
-                Value::Bool(false) => {
+                Value::Bool(false) | Value::Null => {
                     // skip unrevealed
                     continue
                 }
@@ -134,15 +143,32 @@ impl SDJWTHolder {
 
     fn select_disclosures_from_disclosed_list(&self, sd_jwt_claims: &Vec<Value>, claims_to_disclose: &Vec<Value>) -> Vec<String> {
         let mut hash_to_disclosure: Vec<String> = Vec::new();
-        for (claim_to_disclose, claim) in claims_to_disclose.iter().zip(sd_jwt_claims) {
-            match (claim_to_disclose, claim) {
-                (Value::Bool(true), Value::Object(claim)) => {
-                    if let Some(Value::String(digest)) = claim.get(SD_LIST_PREFIX) {
+        for (claim_to_disclose, sd_jwt_claims) in claims_to_disclose.iter().zip(sd_jwt_claims) {
+            match (claim_to_disclose, sd_jwt_claims) {
+                (Value::Bool(true), Value::Object(sd_jwt_claims)) => {
+                    if let Some(Value::String(digest)) = sd_jwt_claims.get(SD_LIST_PREFIX) {
                         hash_to_disclosure.push(self.sd_jwt_engine.hash_to_disclosure[digest].to_owned());
                     }
                 }
-                (Value::Array(new_claims_to_disclose), Value::Array(claim)) => {
-                    self.select_disclosures_from_disclosed_list(claim, new_claims_to_disclose);
+                (claim_to_disclose, Value::Object(sd_jwt_claims)) => {
+                    if let Some(Value::String(digest)) = sd_jwt_claims.get(SD_LIST_PREFIX) {
+                        let disclosure = self.sd_jwt_engine.hash_to_decoded_disclosure[digest].as_array().unwrap();
+                        match (claim_to_disclose, disclosure.get(1)) {
+                            (Value::Array(claim_to_disclose), Some(Value::Array(sd_jwt_claims))) => {
+                                hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(&sd_jwt_claims, claim_to_disclose));
+                            }
+                            (Value::Object(claim_to_disclose), Some(Value::Object(sd_jwt_claims))) => {
+                                hash_to_disclosure.push(self.sd_jwt_engine.hash_to_disclosure[digest].to_owned());
+                                hash_to_disclosure.append(&mut self.select_disclosures(&sd_jwt_claims, claim_to_disclose.to_owned()));
+                            }
+                            _ => {}
+                        }
+                    } else if let Some(claim_to_disclose) = claim_to_disclose.as_object() {
+                        hash_to_disclosure.append(&mut self.select_disclosures(sd_jwt_claims, claim_to_disclose.to_owned()));
+                    }
+                }
+                (Value::Array(claim_to_disclose), Value::Array(sd_jwt_claims)) => {
+                    hash_to_disclosure.append(&mut self.select_disclosures_from_disclosed_list(sd_jwt_claims, claim_to_disclose));
                 }
                 _ => {}
             }

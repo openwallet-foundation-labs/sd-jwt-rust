@@ -25,9 +25,9 @@ pub struct SDJWTIssuer {
     // internal fields
     inner: SDJWTCommon,
     all_disclosures: Vec<SDJWTDisclosure>,
-    sd_jwt_payload: SJMap<String, Value>,
-    signed_sd_jwt: String,
-    pub(crate) serialized_sd_jwt: String,
+    pub sd_jwt_payload: SJMap<String, Value>,
+    pub signed_sd_jwt: String,
+    pub serialized_sd_jwt: String,
 }
 
 pub enum SDJWTClaimsStrategy<'a> {
@@ -72,21 +72,12 @@ impl<'a> SDJWTClaimsStrategy<'a> {
                     str.strip_prefix(key).as_mut().and_then(|claim| {
                         if let Some(next_claim) = claim.strip_prefix('.') {
                             Some(next_claim)
-                        } else if let Some(next_claim) = claim.strip_prefix('[').and_then(|str| str.strip_suffix(']')) {
-                            Some(next_claim)
                         } else {
+                            // FIXME Replace to non-leackable impl
                             // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
                             // For example: [0].street -> 0.street
-                            if let Some(remainder) = claim.strip_prefix('[') {
-                                *claim = remainder;
-                                let remainder: Vec<&str> = claim.splitn(2, ']').collect();
-                                //FIXME Change to safe impl
-                                *claim = remainder.join("").leak();
-
-                                Some(claim)
-                            } else {
-                                None
-                            }
+                            *claim = claim.replace("[", "").replace("]","").leak();
+                            Some(claim)
                         }
                     })
                 }).collect();

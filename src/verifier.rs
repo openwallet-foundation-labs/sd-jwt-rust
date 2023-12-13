@@ -17,7 +17,7 @@ pub struct SDJWTVerifier {
     sd_jwt_payload: Map<String, Value>,
     _holder_public_key_payload: Option<HashMap<String, Value>>,
     duplicate_hash_check: Vec<String>,
-    verified_claims: Value,
+    pub verified_claims: Value,
 
     cb_get_issuer_key: Box<KeyResolver>,
 }
