@@ -3,13 +3,12 @@ use std::str::FromStr;
 use std::vec::Vec;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use jsonwebtoken::jwk::Jwk;
 use rand::Rng;
 use serde_json::{json, Map as SJMap, Map};
 use serde_json::Value;
 
-use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY,
-            SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG,
-            SDJWTCommon, SDJWTHasSDClaimException};
+use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG, SDJWTCommon, SDJWTHasSDClaimException, CNF_KEY, JWK_KEY};
 use crate::disclosure::SDJWTDisclosure;
 
 pub struct SDJWTIssuer {
@@ -20,7 +19,7 @@ pub struct SDJWTIssuer {
 
     // input data
     issuer_key: EncodingKey,
-    holder_key: Option<EncodingKey>,
+    holder_key: Option<Jwk>,
 
     // internal fields
     inner: SDJWTCommon,
@@ -106,7 +105,7 @@ impl SDJWTIssuer {
         user_claims: Value,
         mut sd_strategy: SDJWTClaimsStrategy,
         issuer_key: EncodingKey,
-        holder_key: Option<EncodingKey>,
+        holder_key: Option<Jwk>,
         sign_alg: Option<String>,
         add_decoy_claims: bool,
         serialization_format: String,
@@ -154,9 +153,9 @@ impl SDJWTIssuer {
         self.sd_jwt_payload.append(&mut always_revealed_claims);
 
         if let Some(holder_key) = &self.holder_key {
-            let _ = holder_key;
-            unimplemented!("holder key is not supported for issuance");
-            //TODO public? self.sd_jwt_payload.insert("cnf".to_string(), json!({"jwk": holder_key.export_public(true)}));
+            self.sd_jwt_payload
+                .entry(CNF_KEY)
+                .or_insert_with(|| json!({JWK_KEY: holder_key}));
         }
     }
 

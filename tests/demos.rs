@@ -1,9 +1,10 @@
 use crate::utils::fixtures::{
     ADDRESS_CLAIMS, ADDRESS_ONLY_STRUCTURED_JSONPATH, ADDRESS_ONLY_STRUCTURED_ONE_OPEN_JSONPATH,
     ARRAYED_CLAIMS, ARRAYED_CLAIMS_JSONPATH, COMPLEX_EIDAS_CLAIMS, COMPLEX_EIDAS_JSONPATH,
-    HOLDER_KEY, ISSUER_KEY, ISSUER_PUBLIC_KEY, NESTED_ARRAY_CLAIMS, NESTED_ARRAY_JSONPATH,
-    W3C_VC_CLAIMS, W3C_VC_JSONPATH,
+    HOLDER_JWK_KEY, HOLDER_KEY, ISSUER_KEY, ISSUER_PUBLIC_KEY, NESTED_ARRAY_CLAIMS,
+    NESTED_ARRAY_JSONPATH, W3C_VC_CLAIMS, W3C_VC_JSONPATH,
 };
+use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
@@ -20,10 +21,16 @@ fn issuer_key() -> EncodingKey {
     EncodingKey::from_ec_pem(private_issuer_bytes).unwrap()
 }
 
+fn holder_jwk() -> Option<Jwk> {
+    let jwk: Jwk = serde_json::from_str(HOLDER_JWK_KEY).unwrap();
+    Some(jwk)
+}
+
 #[allow(unused)]
-fn holder_key() -> EncodingKey {
+fn holder_key() -> Option<EncodingKey> {
     let private_issuer_bytes = HOLDER_KEY.as_bytes();
-    EncodingKey::from_ec_pem(private_issuer_bytes).unwrap()
+    let key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+    Some(key)
 }
 
 fn _address_claims() -> serde_json::Value {
@@ -243,11 +250,17 @@ fn w3c_vc<'a>() -> (
 }
 
 #[allow(unused)]
-fn presentation_metadata() -> (Option<String>, Option<String>, Option<EncodingKey>) {
+fn presentation_metadata() -> (
+    Option<String>,
+    Option<String>,
+    Option<EncodingKey>,
+    Option<Jwk>,
+) {
     (
         Some("1234567890".to_owned()),
         Some("https://verifier.example.org".to_owned()),
-        Some(holder_key()),
+        holder_key(),
+        holder_jwk(),
     )
 }
 
@@ -268,23 +281,24 @@ fn demo_positive_cases(
         Map<String, Value>,
         usize,
     ),
-    #[values((None, None, None), /*presentation_metadata()*/)] presentation_metadata: (
+    #[values((None, None, None, None), presentation_metadata())] presentation_metadata: (
         Option<String>,
         Option<String>,
         Option<EncodingKey>,
+        Option<Jwk>,
     ),
     #[values("compact".to_string())] format: String,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
     let (user_claims, strategy, holder_disclosed_claims, number_of_revealed_sds) = data;
-    let (nonce, aud, holder_key) = presentation_metadata;
+    let (nonce, aud, holder_key, holder_jwk) = presentation_metadata;
     // Issuer issues SD-JWT
     let sd_jwt = SDJWTIssuer::issue_sd_jwt(
         user_claims.clone(),
         strategy,
         issuer_key,
-        holder_key.clone(),
+        holder_jwk.clone(),
         sign_algo.clone(),
         add_decoy,
         format.clone(),
@@ -312,9 +326,14 @@ fn demo_positive_cases(
 
     let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
     // Compare that number of disclosed parts are equal
-    assert_eq!(intersected_parts.len(), revealed_parts.len());
+    let mut revealed_parts_number = revealed_parts.len();
+    if holder_jwk.is_some() {
+        // Remove KB
+        revealed_parts_number -= 1;
+    }
+    assert_eq!(intersected_parts.len(), revealed_parts_number);
     // here `+1` means adding issued jwt part also
-    assert_eq!(number_of_revealed_sds + 1, revealed_parts.len());
+    assert_eq!(number_of_revealed_sds + 1, revealed_parts_number);
     // Verify presentation
     let _verified = SDJWTVerifier::new(
         presentation.clone(),

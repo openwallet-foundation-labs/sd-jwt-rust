@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use serde_json::{Map, Value};
 
-use jsonwebtoken::EncodingKey;
-use serde_json::{json, Map, Value};
-
-use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, SD_DIGESTS_KEY, SD_LIST_PREFIX};
+use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, KB_DIGEST_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX};
 use crate::SDJWTCommon;
+use crate::utils::create_base64_encoded_hash;
 
 pub struct SDJWTHolder {
     sd_jwt_engine: SDJWTCommon,
@@ -184,18 +185,29 @@ impl SDJWTHolder {
         sign_alg: Option<String>,
     ) {
         let _alg = sign_alg.unwrap_or_else(|| DEFAULT_SIGNING_ALG.to_string());
-
-        self.key_binding_jwt_header.insert("alg".to_string(), _alg.into());
+        // Set key-binding fields
+        self.key_binding_jwt_header.insert("alg".to_string(), _alg.clone().into());
         self.key_binding_jwt_header.insert("typ".to_string(), crate::KB_JWT_TYP_HEADER.into());
-
         self.key_binding_jwt_payload.insert("nonce".to_string(), nonce.into());
         self.key_binding_jwt_payload.insert("aud".to_string(), aud.into());
         let timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
         self.key_binding_jwt_payload.insert("iat".to_string(), timestamp.into());
+        self._set_key_binding_digest_key();
+        // Create key-binding jwt
+        let mut header = Header::new(Algorithm::from_str(_alg.as_str()).unwrap());
+        header.typ = Some(crate::KB_JWT_TYP_HEADER.into());
+        self.serialized_key_binding_jwt = jsonwebtoken::encode(&header, &self.key_binding_jwt_payload, &_holder_key).unwrap();
+    }
 
-        let _payload = json!(self.key_binding_jwt_payload);
+    fn _set_key_binding_digest_key(&mut self) {
+        let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 1);
+        combined.push(&self.serialized_sd_jwt);
+        combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
+        let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
-        //FIXME jsonwebtoken signature self.serialized_key_binding_jwt = payload.sign_with_key(holder_key).unwrap();
+        let _sd_hash = create_base64_encoded_hash(combined);
+        let _sd_hash = serde_json::to_value(&_sd_hash).unwrap();
+        self.key_binding_jwt_payload.insert(KB_DIGEST_KEY.to_owned(), _sd_hash);
     }
 }
 

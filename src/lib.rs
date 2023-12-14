@@ -11,6 +11,7 @@ mod disclosure;
 pub mod holder;
 pub mod issuer;
 pub mod verifier;
+pub mod utils;
 
 pub const DEFAULT_SIGNING_ALG: &str = "ES256";
 const SD_DIGESTS_KEY: &str = "_sd";
@@ -19,10 +20,13 @@ pub const DEFAULT_DIGEST_ALG: &str = "sha-256";
 const SD_LIST_PREFIX: &str = "...";
 const _SD_JWT_TYP_HEADER: &str = "sd+jwt";
 const KB_JWT_TYP_HEADER: &str = "kb+jwt";
+const KB_DIGEST_KEY: &str = "_sd_hash";
 const JWS_KEY_DISCLOSURES: &str = "disclosures";
 const JWS_KEY_KB_JWT: &str = "kb_jwt";
 pub const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
 const JWT_SEPARATOR: &str = ".";
+const CNF_KEY: &str = "cnf";
+const JWK_KEY: &str = "jwk";
 
 #[derive(Debug)]
 pub(crate) struct SDJWTHasSDClaimException(String);

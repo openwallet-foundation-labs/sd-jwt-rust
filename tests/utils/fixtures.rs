@@ -1,6 +1,12 @@
 pub const ISSUER_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
 pub const ISSUER_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEb28d4MwZMjw8+00CG4xfnn9SLMVM\nM19SlqZpVb/uNtRe/nNbC6hpOB1LqFXjfIjqAHBOeO6SYVBCcn+QLHOqTw==\n-----END PUBLIC KEY-----\n";
 pub const HOLDER_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg5K5SCos8zf9zRemG\nGUl6yfok+/NiiryNZsvANWMhF+KhRANCAARMIARHX1m+7c4cXiPhbi99JWgcg/Ug\nuKUOWzu8J4Z6Z2cY4llm2TEBh1VilUOIW0iIq7FX7nnAhOreI0/Rdh2U\n-----END PRIVATE KEY-----\n";
+pub const HOLDER_JWK_KEY: &str = r#"{
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "TCAER19Zvu3OHF4j4W4vfSVoHIP1ILilDls7vCeGemc",
+    "y": "ZxjiWWbZMQGHVWKVQ4hbSIirsVfuecCE6t4jT9F2HZQ"
+}"#;
 pub const ADDRESS_CLAIMS: &str = r#"{
     "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
     "iss": "https://example.com/issuer",
@@ -125,13 +131,6 @@ pub const W3C_VC_CLAIMS: &str = r#"{
   "jti": "http://example.com/credentials/3732",
   "iat": 1683000000,
   "exp": 1883000000,
-  "cnf": {
-    "jwk": {
-      "kty": "RSA",
-      "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
-      "e": "AQAB"
-    }
-  },
   "type": "IdentityCredential",
   "credentialSubject": {
     "given_name": "John",
