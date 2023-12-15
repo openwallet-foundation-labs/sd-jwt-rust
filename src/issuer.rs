@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG, SDJWTCommon, SDJWTHasSDClaimException, CNF_KEY, JWK_KEY};
 use crate::disclosure::SDJWTDisclosure;
+use crate::utils::{base64_hash, generate_salt};
 
 pub struct SDJWTIssuer {
     // parameters
@@ -179,7 +180,7 @@ impl SDJWTIssuer {
             let subtree = self.create_sd_claims(object, strategy_for_child);
 
             if sd_strategy.sd_for_key(&key) {
-                let disclosure = SDJWTDisclosure::new(None, subtree, &self.inner);
+                let disclosure = SDJWTDisclosure::new(None, subtree);
                 claims.push(json!({ SD_LIST_PREFIX: disclosure.hash}));
                 self.all_disclosures.push(disclosure);
             } else {
@@ -198,7 +199,7 @@ impl SDJWTIssuer {
             let subtree_from_here = self.create_sd_claims(value, strategy_for_child);
 
             if sd_strategy.sd_for_key(key) {
-                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree_from_here, &self.inner);
+                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree_from_here);
                 sd_claims.push(disclosure.hash.clone());
                 self.all_disclosures.push(disclosure);
             } else {
@@ -262,7 +263,7 @@ impl SDJWTIssuer {
     }
 
     fn create_decoy_claim_entry(&mut self) -> String {
-        let digest = self.inner.b64hash(SDJWTCommon::generate_salt(None).as_bytes()).to_string();
+        let digest = base64_hash(generate_salt(None).as_bytes()).to_string();
         digest
     }
 }

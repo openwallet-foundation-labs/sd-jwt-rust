@@ -8,7 +8,7 @@ use log::debug;
 use serde_json::{Map, Value};
 
 use crate::{CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY, SDJWTCommon};
-use crate::utils::create_base64_encoded_hash;
+use crate::utils::base64_hash;
 
 type KeyResolver = dyn Fn(&str, &Header) -> DecodingKey;
 
@@ -148,7 +148,7 @@ impl SDJWTVerifier {
         combined.extend(self.sd_jwt_engine.input_disclosures.iter().map(|s| s.as_str()));
         let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
-        create_base64_encoded_hash(combined)
+        base64_hash(combined.as_bytes())
     }
 
     fn extract_sd_claims(&mut self) -> Result<Value, String> {

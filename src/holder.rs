@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, KB_DIGEST_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX};
 use crate::SDJWTCommon;
-use crate::utils::create_base64_encoded_hash;
+use crate::utils::base64_hash;
 
 pub struct SDJWTHolder {
     sd_jwt_engine: SDJWTCommon,
@@ -205,7 +205,7 @@ impl SDJWTHolder {
         combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
         let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
-        let _sd_hash = create_base64_encoded_hash(combined);
+        let _sd_hash = base64_hash(combined.as_bytes());
         let _sd_hash = serde_json::to_value(&_sd_hash).unwrap();
         self.key_binding_jwt_payload.insert(KB_DIGEST_KEY.to_owned(), _sd_hash);
     }
