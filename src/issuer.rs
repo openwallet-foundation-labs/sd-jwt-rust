@@ -1,16 +1,23 @@
+use crate::error;
+use error::Result;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::vec::Vec;
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use jsonwebtoken::jwk::Jwk;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rand::Rng;
-use serde_json::{json, Map as SJMap, Map};
 use serde_json::Value;
+use serde_json::{json, Map as SJMap, Map};
 
-use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG, SDJWTCommon, SDJWTHasSDClaimException, CNF_KEY, JWK_KEY};
 use crate::disclosure::SDJWTDisclosure;
+use crate::error::Error;
 use crate::utils::{base64_hash, generate_salt};
+use crate::{
+    SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+    DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY,
+    SD_LIST_PREFIX,
+};
 
 pub struct SDJWTIssuer {
     // parameters
@@ -45,20 +52,19 @@ pub enum SDJWTClaimsStrategy<'a> {
 // let strategy = Partial(vec!["$.address", "$.address.street_address"])
 // }
 impl<'a> SDJWTClaimsStrategy<'a> {
-
-    fn finalize_input(&mut self) -> Result<(), SDJWTHasSDClaimException> {
+    fn finalize_input(&mut self) -> Result<()> {
         match self {
             SDJWTClaimsStrategy::Partial(keys) => {
                 for key in keys.iter_mut() {
                     if let Some(new_key) = key.strip_prefix("$.") {
                         *key = new_key;
                     } else {
-                        return Err(SDJWTHasSDClaimException("Invalid JSONPath".to_owned()))
+                        return Err(Error::InvalidPath("Invalid JSONPath".to_owned()));
                     }
                 }
                 Ok(())
             }
-            _ => Ok(())
+            _ => Ok(()),
         }
     }
 
@@ -68,19 +74,22 @@ impl<'a> SDJWTClaimsStrategy<'a> {
             Self::Flat => Self::No,
             Self::Full => Self::Full,
             Self::Partial(sd_keys) => {
-                let next_sd_keys = sd_keys.iter().filter_map(|str| {
-                    str.strip_prefix(key).as_mut().and_then(|claim| {
-                        if let Some(next_claim) = claim.strip_prefix('.') {
-                            Some(next_claim)
-                        } else {
-                            // FIXME Replace to non-leackable impl
-                            // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
-                            // For example: [0].street -> 0.street
-                            *claim = claim.replace("[", "").replace("]","").leak();
-                            Some(claim)
-                        }
+                let next_sd_keys = sd_keys
+                    .iter()
+                    .filter_map(|str| {
+                        str.strip_prefix(key).as_mut().and_then(|claim| {
+                            if let Some(next_claim) = claim.strip_prefix('.') {
+                                Some(next_claim)
+                            } else {
+                                // FIXME Replace to non-leackable impl
+                                // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
+                                // For example: [0].street -> 0.street
+                                *claim = claim.replace("[", "").replace("]", "").leak();
+                                Some(claim)
+                            }
+                        })
                     })
-                }).collect();
+                    .collect();
                 Self::Partial(next_sd_keys)
             }
         }
@@ -91,9 +100,7 @@ impl<'a> SDJWTClaimsStrategy<'a> {
             Self::No => false,
             Self::Flat => true,
             Self::Full => true,
-            Self::Partial(sd_keys) => {
-                sd_keys.contains(&key)
-            }
+            Self::Partial(sd_keys) => sd_keys.contains(&key),
         }
     }
 }
@@ -111,7 +118,7 @@ impl SDJWTIssuer {
         add_decoy_claims: bool,
         serialization_format: String,
         // extra_header_parameters: Option<HashMap<String, String>>,
-    ) -> Self {
+    ) -> Result<Self> {
         let sign_alg = sign_alg.unwrap_or_else(|| DEFAULT_SIGNING_ALG.to_string());
 
         let inner = SDJWTCommon {
@@ -119,9 +126,9 @@ impl SDJWTIssuer {
             ..Default::default()
         };
 
-        sd_strategy.finalize_input().unwrap();
+        sd_strategy.finalize_input()?;
 
-        SDJWTCommon::check_for_sd_claim(&user_claims).unwrap();
+        SDJWTCommon::check_for_sd_claim(&user_claims)?;
 
         let mut issuer = SDJWTIssuer {
             issuer_key,
@@ -136,21 +143,37 @@ impl SDJWTIssuer {
             serialized_sd_jwt: String::new(),
         };
 
-        issuer.assemble_sd_jwt_payload(user_claims, sd_strategy);
-        issuer.create_signed_jws();
+        issuer.assemble_sd_jwt_payload(user_claims, sd_strategy)?;
+        issuer.create_signed_jws()?;
         issuer.create_combined();
 
-        issuer
+        Ok(issuer)
     }
 
-    fn assemble_sd_jwt_payload(&mut self, mut user_claims: Value, sd_strategy: SDJWTClaimsStrategy) {
-        let claims_obj_ref = user_claims.as_object_mut().unwrap();
+    fn assemble_sd_jwt_payload(
+        &mut self,
+        mut user_claims: Value,
+        sd_strategy: SDJWTClaimsStrategy,
+    ) -> Result<()> {
+        let claims_obj_ref = user_claims
+            .as_object_mut()
+            .ok_or(Error::ConversionError("json object".to_string()))?;
         let always_revealed_root_keys = vec!["sub", "iss", "iat", "exp"];
-        let mut always_revealed_claims: Map<String, Value> = always_revealed_root_keys.into_iter().filter_map(|key| claims_obj_ref.remove_entry(key)).collect();
+        let mut always_revealed_claims: Map<String, Value> = always_revealed_root_keys
+            .into_iter()
+            .filter_map(|key| claims_obj_ref.remove_entry(key))
+            .collect();
 
-        self.sd_jwt_payload = self.create_sd_claims(&user_claims, sd_strategy).as_object().unwrap().clone();
+        self.sd_jwt_payload = self
+            .create_sd_claims(&user_claims, sd_strategy)
+            .as_object()
+            .ok_or(Error::ConversionError("json object".to_string()))?
+            .clone();
 
-        self.sd_jwt_payload.insert(DIGEST_ALG_KEY.to_owned(), Value::String(DEFAULT_DIGEST_ALG.to_owned())); //TODO
+        self.sd_jwt_payload.insert(
+            DIGEST_ALG_KEY.to_owned(),
+            Value::String(DEFAULT_DIGEST_ALG.to_owned()),
+        ); //TODO
         self.sd_jwt_payload.append(&mut always_revealed_claims);
 
         if let Some(holder_key) = &self.holder_key {
@@ -158,17 +181,15 @@ impl SDJWTIssuer {
                 .entry(CNF_KEY)
                 .or_insert_with(|| json!({JWK_KEY: holder_key}));
         }
+
+        Ok(())
     }
 
     fn create_sd_claims(&mut self, user_claims: &Value, sd_strategy: SDJWTClaimsStrategy) -> Value {
         match user_claims {
-            Value::Array(list) => {
-                self.create_sd_claims_list(list, sd_strategy)
-            }
-            Value::Object(object) => {
-                self.create_sd_claims_object(object, sd_strategy)
-            }
-            _ => user_claims.to_owned()
+            Value::Array(list) => self.create_sd_claims_list(list, sd_strategy),
+            Value::Object(object) => self.create_sd_claims_object(object, sd_strategy),
+            _ => user_claims.to_owned(),
         }
     }
 
@@ -190,7 +211,11 @@ impl SDJWTIssuer {
         Value::Array(claims)
     }
 
-    fn create_sd_claims_object(&mut self, user_claims: &SJMap<String, Value>, sd_strategy: SDJWTClaimsStrategy) -> Value {
+    fn create_sd_claims_object(
+        &mut self,
+        user_claims: &SJMap<String, Value>,
+        sd_strategy: SDJWTClaimsStrategy,
+    ) -> Value {
         let mut claims = SJMap::new();
         let mut sd_claims = Vec::new();
 
@@ -208,7 +233,8 @@ impl SDJWTIssuer {
         }
 
         if self.add_decoy_claims {
-            let num_decoy_elements = rand::thread_rng().gen_range(Self::DECOY_MIN_ELEMENTS..Self::DECOY_MAX_ELEMENTS);
+            let num_decoy_elements =
+                rand::thread_rng().gen_range(Self::DECOY_MIN_ELEMENTS..Self::DECOY_MAX_ELEMENTS);
             for _ in 0..num_decoy_elements {
                 sd_claims.push(self.create_decoy_claim_entry());
             }
@@ -216,13 +242,16 @@ impl SDJWTIssuer {
 
         if !sd_claims.is_empty() {
             sd_claims.sort();
-            claims.insert(SD_DIGESTS_KEY.to_owned(), Value::Array(sd_claims.into_iter().map(Value::String).collect()));
+            claims.insert(
+                SD_DIGESTS_KEY.to_owned(),
+                Value::Array(sd_claims.into_iter().map(Value::String).collect()),
+            );
         }
 
         Value::Object(claims)
     }
 
-    fn create_signed_jws(&mut self) {
+    fn create_signed_jws(&mut self) -> Result<()> {
         if let Some(extra_headers) = &self.extra_header_parameters {
             let mut _protected_headers = extra_headers.clone();
             for (key, value) in extra_headers.iter() {
@@ -231,9 +260,13 @@ impl SDJWTIssuer {
             unimplemented!("extra_headers are not supported for issuance");
         }
 
-        let mut header = Header::new(Algorithm::from_str(&self.sign_alg).unwrap());
+        let mut header = Header::new(
+            Algorithm::from_str(&self.sign_alg)
+                .map_err(|e| Error::DeserializationError(e.to_string()))?,
+        );
         header.typ = self.inner.typ.clone();
-        self.signed_sd_jwt = jsonwebtoken::encode(&header, &self.sd_jwt_payload, &self.issuer_key).unwrap();
+        self.signed_sd_jwt = jsonwebtoken::encode(&header, &self.sd_jwt_payload, &self.issuer_key)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
 
         if self.inner.serialization_format == "json" {
             unimplemented!("json serialization is not supported for issuance");
@@ -241,11 +274,17 @@ impl SDJWTIssuer {
             // jws_content.insert(JWS_KEY_DISCLOSURES.to_string(), self.ii_disclosures.iter().map(|d| d.b64.to_string()).collect());
             // self.serialized_sd_jwt = serde_json::to_string(&jws_content).unwrap();
         }
+
+        Ok(())
     }
 
     fn create_combined(&mut self) {
         if self.inner.serialization_format == "compact" {
-            let mut disclosures: VecDeque<String> = self.all_disclosures.iter().map(|d| d.raw_b64.to_string()).collect();
+            let mut disclosures: VecDeque<String> = self
+                .all_disclosures
+                .iter()
+                .map(|d| d.raw_b64.to_string())
+                .collect();
             disclosures.push_front(self.signed_sd_jwt.clone());
 
             let disclosures: Vec<&str> = disclosures.iter().map(|s| s.as_str()).collect();
@@ -295,7 +334,15 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(user_claims, SDJWTClaimsStrategy::Full, issuer_key, None, None, false, "compact".to_owned());
+        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+            user_claims,
+            SDJWTClaimsStrategy::Full,
+            issuer_key,
+            None,
+            None,
+            false,
+            "compact".to_owned(),
+        ).unwrap();
         trace!("{:?}", sd_jwt.serialized_sd_jwt)
     }
 }
