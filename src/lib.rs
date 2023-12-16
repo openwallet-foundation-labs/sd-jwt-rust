@@ -1,15 +1,14 @@
-use std::collections::HashMap;
-use base64::{engine::general_purpose, Engine};
+use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
 use lazy_static::lazy_static;
-use rand::prelude::ThreadRng;
-use rand::RngCore;
 use serde_json::{Map, Value};
-use sha2::Digest;
+use std::collections::HashMap;
 use std::sync::Mutex;
 pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, verifier::SDJWTVerifier};
+
 mod disclosure;
 pub mod holder;
 pub mod issuer;
+pub mod utils;
 pub mod verifier;
 
 pub const DEFAULT_SIGNING_ALG: &str = "ES256";
@@ -19,10 +18,13 @@ pub const DEFAULT_DIGEST_ALG: &str = "sha-256";
 const SD_LIST_PREFIX: &str = "...";
 const _SD_JWT_TYP_HEADER: &str = "sd+jwt";
 const KB_JWT_TYP_HEADER: &str = "kb+jwt";
+const KB_DIGEST_KEY: &str = "_sd_hash";
 const JWS_KEY_DISCLOSURES: &str = "disclosures";
 const JWS_KEY_KB_JWT: &str = "kb_jwt";
 pub const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
 const JWT_SEPARATOR: &str = ".";
+const CNF_KEY: &str = "cnf";
+const JWK_KEY: &str = "jwk";
 
 #[derive(Debug)]
 pub(crate) struct SDJWTHasSDClaimException(String);
@@ -43,26 +45,19 @@ pub(crate) struct SDJWTCommon {
 
 // Define the SDJWTCommon struct to hold common properties.
 impl SDJWTCommon {
-    fn b64hash(&self, data: &[u8]) -> String {
-        let mut hasher = sha2::Sha256::new(); // TODO dynamic type
-        hasher.update(data);
-        let hash = hasher.finalize();
-        SDJWTCommon::base64url_encode(&hash)
-    }
-
     fn create_hash_mappings(&mut self) -> Result<(), String> {
         self.hash_to_decoded_disclosure = HashMap::new();
         self.hash_to_disclosure = HashMap::new();
 
         for disclosure in &self.input_disclosures {
-            let decoded_disclosure = SDJWTCommon::base64url_decode(disclosure).map_err(
+            let decoded_disclosure = base64url_decode(disclosure).map_err(
                 |err| format!("Error decoding disclosure {}: {}", disclosure, err)
             )?;
             let decoded_disclosure: Value = serde_json::from_slice(&decoded_disclosure).map_err(
                 |err| format!("Error parsing disclosure {}: {}", disclosure, err)
             )?;
 
-            let hash = self.b64hash(disclosure.as_bytes());
+            let hash = base64_hash(disclosure.as_bytes());
             if self.hash_to_decoded_disclosure.contains_key(&hash) {
                 return Err(format!("Duplicate disclosure hash {} for disclosure {:?}", hash, decoded_disclosure));
             }
@@ -111,7 +106,7 @@ impl SDJWTCommon {
             let mut sd_jwt = sd_jwt.split(JWT_SEPARATOR);
             sd_jwt.next();
             let jwt_body = sd_jwt.next().unwrap();
-            self.unverified_input_sd_jwt_payload = Some(SDJWTCommon::jwt_payload_decode(jwt_body).unwrap());
+            self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(jwt_body).unwrap());
             Ok(())
         } else {
             // If the SD-JWT is in JSON format, parse the JSON and extract the disclosures.
@@ -119,38 +114,13 @@ impl SDJWTCommon {
             self.unverified_input_key_binding_jwt = unverified_input_sd_jwt_parsed.get(JWS_KEY_KB_JWT).map(Value::to_string);
             self.input_disclosures = unverified_input_sd_jwt_parsed[JWS_KEY_DISCLOSURES].as_array().unwrap().iter().map(Value::to_string).collect();
             let payload = unverified_input_sd_jwt_parsed["payload"].as_str().unwrap();
-            self.unverified_input_sd_jwt_payload = Some(SDJWTCommon::jwt_payload_decode(payload).unwrap());
+            self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(payload).unwrap());
             Ok(())
         }
     }
 
     fn get_serialization_format(&self) -> &str {
         &self.serialization_format
-    }
-
-    fn base64url_encode(data: &[u8]) -> String {
-        general_purpose::URL_SAFE_NO_PAD.encode(data)
-    }
-
-    fn base64url_decode(b64data: &str) -> Result<Vec<u8>, base64::DecodeError> {
-        general_purpose::URL_SAFE_NO_PAD.decode(b64data)
-    }
-
-    fn jwt_payload_decode(b64data: &str) -> Result<serde_json::Map<String, Value>, SDJWTHasSDClaimException> {
-        Ok(serde_json::from_str(&String::from_utf8(Self::base64url_decode(b64data).unwrap()).unwrap()).unwrap())
-    }
-
-
-    fn generate_salt(key_for_predefined_salt: Option<String>) -> String {
-        let map = SALTS.lock().unwrap();
-
-        if let Some(salt) = key_for_predefined_salt.and_then(|key|map.get(&key)) { //FIXME better mock approach
-            salt.clone()
-        } else {
-            let mut buf = [0u8; 16];
-            ThreadRng::default().fill_bytes(&mut buf);
-            Self::base64url_encode(&buf)
-        }
     }
 }
 

@@ -1,13 +1,14 @@
-use std::collections::HashMap;
 use std::option::Option;
+use std::str::FromStr;
 use std::string::String;
 use std::vec::Vec;
-
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
+use jsonwebtoken::jwk::Jwk;
 use log::debug;
 use serde_json::{Map, Value};
 
-use crate::{DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, SD_DIGESTS_KEY, SDJWTCommon};
+use crate::{CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY, SDJWTCommon};
+use crate::utils::base64_hash;
 
 type KeyResolver = dyn Fn(&str, &Header) -> DecodingKey;
 
@@ -15,7 +16,7 @@ pub struct SDJWTVerifier {
     sd_jwt_engine: SDJWTCommon,
 
     sd_jwt_payload: Map<String, Value>,
-    _holder_public_key_payload: Option<HashMap<String, Value>>,
+    _holder_public_key_payload: Option<Map<String, Value>>,
     duplicate_hash_check: Vec<String>,
     pub verified_claims: Value,
 
@@ -72,13 +73,82 @@ impl SDJWTVerifier {
         let _ = sign_alg; //FIXME check algo
 
         self.sd_jwt_payload = claims;
+        self._holder_public_key_payload = if let Some(holder_public_key_payload) =
+            self.sd_jwt_payload.get(CNF_KEY).and_then(Value::as_object)
+        {
+            Some(holder_public_key_payload.clone())
+        } else {
+            None
+        };
 
         Ok(())
     }
 
     fn verify_key_binding_jwt(&mut self, expected_aud: String, expected_nonce: String, sign_alg: Option<&str>) -> Result<(), String> {
-        let (_, _, _) = (expected_aud, expected_nonce, sign_alg);
-        unimplemented!("JWT KB");
+        let sign_alg = sign_alg.unwrap_or(DEFAULT_SIGNING_ALG);
+        let holder_public_key_payload_jwk = match &self._holder_public_key_payload {
+            None => { return Err("No holder public key in SD-JWT".to_string()); }
+            Some(payload) => {
+                if let Some(jwk) = payload.get(JWK_KEY) {
+                    jwk.clone()
+                } else {
+                    return Err("The holder_public_key_payload is malformed. It doesn't contain the claim jwk".to_string());
+                }
+            }
+        };
+        let pubkey: DecodingKey = match serde_json::from_value::<Jwk>(holder_public_key_payload_jwk) {
+            Ok(jwk) => {
+                if let Ok(pubkey) = DecodingKey::from_jwk(&jwk) {
+                    pubkey
+                } else {
+                    return Err("Cannot parse DecodingKey from json".to_string());
+                }
+            },
+            Err(_) => {
+                return Err("Cannot parse JWK from json".to_string());
+            }
+        };
+        let key_binding_jwt = match &self.sd_jwt_engine.unverified_input_key_binding_jwt {
+            Some(payload) => {
+                let mut validation = Validation::new(Algorithm::from_str(sign_alg).unwrap());
+                validation.set_audience(&[expected_aud.as_str()]);
+                validation.set_required_spec_claims(&["aud"]);
+
+                let jwt = jsonwebtoken::decode::<Map<String, Value>>(
+                    payload.as_str(),
+                    &pubkey,
+                    &validation,
+                ).unwrap();
+
+                jwt
+            }
+            None => {
+                return Err("Cannot parse Key Binding JWK from json".to_string());
+            }
+        };
+        if key_binding_jwt.header.typ != Some(KB_JWT_TYP_HEADER.to_string()) {
+            return Err("Invalid header type".to_string());
+        }
+        if key_binding_jwt.claims.get("nonce") != Some(&Value::String(expected_nonce)) {
+            return Err("Invalid nonce in KB-JWT".to_string());
+        }
+        if self.sd_jwt_engine.serialization_format == "compact" {
+            let _sd_hash = self._get_key_binding_digest_hash();
+            if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(_sd_hash)) {
+                return Err("Invalid digest in KB-JWT".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn _get_key_binding_digest_hash(&mut self) -> String {
+        let mut combined: Vec<&str> = Vec::with_capacity(self.sd_jwt_engine.input_disclosures.len() + 1);
+        combined.push(self.sd_jwt_engine.unverified_sd_jwt.as_ref().unwrap().as_str());
+        combined.extend(self.sd_jwt_engine.input_disclosures.iter().map(|s| s.as_str()));
+        let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
+
+        base64_hash(combined.as_bytes())
     }
 
     fn extract_sd_claims(&mut self) -> Result<Value, String> {

@@ -3,14 +3,14 @@ use std::str::FromStr;
 use std::vec::Vec;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use jsonwebtoken::jwk::Jwk;
 use rand::Rng;
 use serde_json::{json, Map as SJMap, Map};
 use serde_json::Value;
 
-use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY,
-            SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG,
-            SDJWTCommon, SDJWTHasSDClaimException};
+use crate::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX, DEFAULT_SIGNING_ALG, SDJWTCommon, SDJWTHasSDClaimException, CNF_KEY, JWK_KEY};
 use crate::disclosure::SDJWTDisclosure;
+use crate::utils::{base64_hash, generate_salt};
 
 pub struct SDJWTIssuer {
     // parameters
@@ -20,7 +20,7 @@ pub struct SDJWTIssuer {
 
     // input data
     issuer_key: EncodingKey,
-    holder_key: Option<EncodingKey>,
+    holder_key: Option<Jwk>,
 
     // internal fields
     inner: SDJWTCommon,
@@ -106,7 +106,7 @@ impl SDJWTIssuer {
         user_claims: Value,
         mut sd_strategy: SDJWTClaimsStrategy,
         issuer_key: EncodingKey,
-        holder_key: Option<EncodingKey>,
+        holder_key: Option<Jwk>,
         sign_alg: Option<String>,
         add_decoy_claims: bool,
         serialization_format: String,
@@ -154,9 +154,9 @@ impl SDJWTIssuer {
         self.sd_jwt_payload.append(&mut always_revealed_claims);
 
         if let Some(holder_key) = &self.holder_key {
-            let _ = holder_key;
-            unimplemented!("holder key is not supported for issuance");
-            //TODO public? self.sd_jwt_payload.insert("cnf".to_string(), json!({"jwk": holder_key.export_public(true)}));
+            self.sd_jwt_payload
+                .entry(CNF_KEY)
+                .or_insert_with(|| json!({JWK_KEY: holder_key}));
         }
     }
 
@@ -180,7 +180,7 @@ impl SDJWTIssuer {
             let subtree = self.create_sd_claims(object, strategy_for_child);
 
             if sd_strategy.sd_for_key(&key) {
-                let disclosure = SDJWTDisclosure::new(None, subtree, &self.inner);
+                let disclosure = SDJWTDisclosure::new(None, subtree);
                 claims.push(json!({ SD_LIST_PREFIX: disclosure.hash}));
                 self.all_disclosures.push(disclosure);
             } else {
@@ -199,7 +199,7 @@ impl SDJWTIssuer {
             let subtree_from_here = self.create_sd_claims(value, strategy_for_child);
 
             if sd_strategy.sd_for_key(key) {
-                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree_from_here, &self.inner);
+                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree_from_here);
                 sd_claims.push(disclosure.hash.clone());
                 self.all_disclosures.push(disclosure);
             } else {
@@ -263,7 +263,7 @@ impl SDJWTIssuer {
     }
 
     fn create_decoy_claim_entry(&mut self) -> String {
-        let digest = self.inner.b64hash(SDJWTCommon::generate_salt(None).as_bytes()).to_string();
+        let digest = base64_hash(generate_salt(None).as_bytes()).to_string();
         digest
     }
 }
