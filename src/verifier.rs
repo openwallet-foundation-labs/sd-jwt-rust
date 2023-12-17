@@ -232,8 +232,7 @@ impl SDJWTVerifier {
                     let claim = self.unpack_disclosed_claims(value)?;
                     claims.push(claim);
                 }
-                return serde_json::to_value(claims)
-                    .map_err(|e| Error::DeserializationError(e.to_string()));
+                return Ok(Value::Array(claims));
             }
             Value::Object(obj) => obj,
         };
