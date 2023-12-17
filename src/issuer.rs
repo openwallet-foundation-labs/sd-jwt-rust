@@ -109,18 +109,38 @@ impl SDJWTIssuer {
     const DECOY_MIN_ELEMENTS: u32 = 2;
     const DECOY_MAX_ELEMENTS: u32 = 5;
 
+    pub fn new(issuer_key: EncodingKey,sign_alg: Option<String>) -> Self {
+        SDJWTIssuer {
+            sign_alg: sign_alg.unwrap_or(DEFAULT_SIGNING_ALG.to_owned()),
+            add_decoy_claims: false,
+            extra_header_parameters: None,
+            issuer_key,
+            holder_key: None,
+            inner: Default::default(),
+            all_disclosures: vec![],
+            sd_jwt_payload: Default::default(),
+            signed_sd_jwt: "".to_string(),
+            serialized_sd_jwt: "".to_string(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.extra_header_parameters = Default::default();
+        self.all_disclosures = Default::default();
+        self.sd_jwt_payload = Default::default();
+        self.signed_sd_jwt = Default::default();
+        self.serialized_sd_jwt = Default::default();
+    }
+
     pub fn issue_sd_jwt(
+        &mut self,
         user_claims: Value,
         mut sd_strategy: SDJWTClaimsStrategy,
-        issuer_key: EncodingKey,
         holder_key: Option<Jwk>,
-        sign_alg: Option<String>,
         add_decoy_claims: bool,
         serialization_format: String,
         // extra_header_parameters: Option<HashMap<String, String>>,
-    ) -> Result<Self> {
-        let sign_alg = sign_alg.unwrap_or_else(|| DEFAULT_SIGNING_ALG.to_string());
-
+    ) -> Result<String> {
         let inner = SDJWTCommon {
             serialization_format,
             ..Default::default()
@@ -130,24 +150,16 @@ impl SDJWTIssuer {
 
         SDJWTCommon::check_for_sd_claim(&user_claims)?;
 
-        let mut issuer = SDJWTIssuer {
-            issuer_key,
-            holder_key,
-            sign_alg,
-            add_decoy_claims,
-            extra_header_parameters: None,
-            inner,
-            all_disclosures: Vec::new(),
-            sd_jwt_payload: serde_json::Map::new(),
-            signed_sd_jwt: String::new(),
-            serialized_sd_jwt: String::new(),
-        };
+        self.reset();
+        self.inner = inner;
+        self.holder_key = holder_key;
+        self.add_decoy_claims = add_decoy_claims;
 
-        issuer.assemble_sd_jwt_payload(user_claims, sd_strategy)?;
-        issuer.create_signed_jws()?;
-        issuer.create_combined();
+        self.assemble_sd_jwt_payload(user_claims, sd_strategy)?;
+        self.create_signed_jws()?;
+        self.create_combined();
 
-        Ok(issuer)
+        Ok(self.serialized_sd_jwt.clone())
     }
 
     fn assemble_sd_jwt_payload(
@@ -334,15 +346,13 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims,
             SDJWTClaimsStrategy::Full,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
         ).unwrap();
-        trace!("{:?}", sd_jwt.serialized_sd_jwt)
+        trace!("{:?}", sd_jwt)
     }
 }

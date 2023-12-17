@@ -336,16 +336,14 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
             SDJWTClaimsStrategy::Full,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
         ).unwrap();
-        let presentation = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), "compact".to_owned()).unwrap()
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned()).unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
                 None,
@@ -353,7 +351,7 @@ mod tests {
                 None,
                 None,
             ).unwrap();
-        assert_eq!(sd_jwt.serialized_sd_jwt, presentation);
+        assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
             Box::new(|_, _| {
@@ -406,11 +404,9 @@ mod tests {
             "$.addresses[1].country",
             "$.nationalities[0]",
         ]);
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
             strategy,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
@@ -420,7 +416,7 @@ mod tests {
         claims_to_disclose["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
         claims_to_disclose["nationalities"] =
             Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
-        let presentation = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), "compact".to_owned()).unwrap()
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned()).unwrap()
             .create_presentation(
                 claims_to_disclose.as_object().unwrap().clone(),
                 None,

@@ -353,18 +353,16 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
             SDJWTClaimsStrategy::Full,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
         )
             .unwrap();
         let presentation = SDJWTHolder::new(
-            sd_jwt.serialized_sd_jwt.clone(),
+            sd_jwt.clone(),
             "compact".to_ascii_lowercase(),
         )
             .unwrap()
@@ -376,7 +374,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(sd_jwt.serialized_sd_jwt, presentation);
+        assert_eq!(sd_jwt, presentation);
     }
     #[test]
     fn create_presentation_empty_object_as_disclosure_value() {
@@ -395,20 +393,18 @@ mod tests {
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
 
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
             SDJWTClaimsStrategy::Full,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
         )
             .unwrap();
-        let issued = sd_jwt.serialized_sd_jwt.clone();
+        let issued = sd_jwt.clone();
         user_claims["address"] = Value::Object(Map::new());
         let presentation =
-            SDJWTHolder::new(sd_jwt.serialized_sd_jwt, "compact".to_ascii_lowercase())
+            SDJWTHolder::new(sd_jwt, "compact".to_ascii_lowercase())
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),
@@ -465,11 +461,9 @@ mod tests {
 
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
             strategy,
-            issuer_key,
-            None,
             None,
             false,
             "compact".to_owned(),
@@ -479,10 +473,10 @@ mod tests {
         user_claims["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(false)]);
         user_claims["nationalities"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
 
-        let issued = sd_jwt.serialized_sd_jwt.clone();
+        let issued = sd_jwt.clone();
         println!("{}", issued);
         let presentation =
-            SDJWTHolder::new(sd_jwt.serialized_sd_jwt, "compact".to_ascii_lowercase())
+            SDJWTHolder::new(sd_jwt, "compact".to_ascii_lowercase())
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),
