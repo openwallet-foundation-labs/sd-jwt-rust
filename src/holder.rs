@@ -18,12 +18,10 @@ pub struct SDJWTHolder {
     hs_disclosures: Vec<String>,
     key_binding_jwt_header: HashMap<String, Value>,
     key_binding_jwt_payload: HashMap<String, Value>,
-    //FIXME restore key_binding_jwt: JWS,
     serialized_key_binding_jwt: String,
     sd_jwt_payload: Map<String, Value>,
     serialized_sd_jwt: String,
     sd_jwt: String,
-    pub sd_jwt_presentation: String,
 }
 
 impl SDJWTHolder {
@@ -45,7 +43,6 @@ impl SDJWTHolder {
             key_binding_jwt_header: HashMap::new(),
             key_binding_jwt_payload: HashMap::new(),
             serialized_key_binding_jwt: "".to_string(),
-            sd_jwt_presentation: "".to_string(),
             sd_jwt_payload: Map::new(),
             serialized_sd_jwt: "".to_string(),
             sd_jwt: "".to_string(),
@@ -65,18 +62,22 @@ impl SDJWTHolder {
             .take()
             .ok_or(Error::InvalidState("Cannot take jwt".to_string()))?;
 
+        holder.sd_jwt_engine.create_hash_mappings()?;
+
         Ok(holder)
     }
 
     pub fn create_presentation(
-        mut self,
+        &mut self,
         claims_to_disclose: Map<String, Value>,
         nonce: Option<String>,
         aud: Option<String>,
         holder_key: Option<EncodingKey>,
         sign_alg: Option<String>,
     ) -> Result<String> {
-        self.sd_jwt_engine.create_hash_mappings()?;
+        self.key_binding_jwt_header = Default::default();
+        self.key_binding_jwt_payload = Default::default();
+        self.serialized_key_binding_jwt = Default::default();
         self.hs_disclosures = self.select_disclosures(&self.sd_jwt_payload, claims_to_disclose)?;
 
         match (nonce, aud, holder_key) {
@@ -91,13 +92,13 @@ impl SDJWTHolder {
             }
         }
 
-        if self.sd_jwt_engine.serialization_format == "compact" {
+        let sd_jwt_presentation = if self.sd_jwt_engine.serialization_format == "compact" {
             let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 2);
             combined.push(&self.serialized_sd_jwt);
             combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
             combined.push(&self.serialized_key_binding_jwt);
             let joined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
-            self.sd_jwt_presentation = joined.to_string();
+            joined.to_string()
         } else {
             let mut sd_jwt_parsed: Map<String, Value> = serde_json::from_str(&self.sd_jwt)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?;
@@ -111,11 +112,11 @@ impl SDJWTHolder {
                     self.serialized_key_binding_jwt.clone().into(),
                 );
             }
-            self.sd_jwt_presentation = serde_json::to_string(&sd_jwt_parsed)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        }
+            serde_json::to_string(&sd_jwt_parsed)
+                .map_err(|e| Error::DeserializationError(e.to_string()))?
+        };
 
-        Ok(self.sd_jwt_presentation)
+        Ok(sd_jwt_presentation)
     }
 
     fn select_disclosures(
@@ -161,7 +162,7 @@ impl SDJWTHolder {
                     {
                         hash_to_disclosure.append(
                             &mut self.select_disclosures_from_disclosed_list(
-                                &sd_jwt_claims,
+                                sd_jwt_claims,
                                 &claims_to_disclose,
                             )?,
                         )
@@ -171,7 +172,7 @@ impl SDJWTHolder {
                     {
                         hash_to_disclosure.append(
                             &mut self.select_disclosures_from_disclosed_list(
-                                &sd_jwt_claims,
+                                sd_jwt_claims,
                                 &claims_to_disclose,
                             )?,
                         )
@@ -214,8 +215,8 @@ impl SDJWTHolder {
 
     fn select_disclosures_from_disclosed_list(
         &self,
-        sd_jwt_claims: &Vec<Value>,
-        claims_to_disclose: &Vec<Value>,
+        sd_jwt_claims: &[Value],
+        claims_to_disclose: &[Value],
     ) -> Result<Vec<String>> {
         let mut hash_to_disclosure: Vec<String> = Vec::new();
         for (claim_to_disclose, sd_jwt_claims) in claims_to_disclose.iter().zip(sd_jwt_claims) {
@@ -238,7 +239,7 @@ impl SDJWTHolder {
                             ) => {
                                 hash_to_disclosure.append(
                                     &mut self.select_disclosures_from_disclosed_list(
-                                        &sd_jwt_claims,
+                                        sd_jwt_claims,
                                         claim_to_disclose,
                                     )?,
                                 );
@@ -250,7 +251,7 @@ impl SDJWTHolder {
                                 hash_to_disclosure
                                     .push(self.sd_jwt_engine.hash_to_disclosure[digest].to_owned());
                                 hash_to_disclosure.append(&mut self.select_disclosures(
-                                    &sd_jwt_claims,
+                                    sd_jwt_claims,
                                     claim_to_disclose.to_owned(),
                                 )?);
                             }
@@ -279,13 +280,13 @@ impl SDJWTHolder {
         &mut self,
         nonce: String,
         aud: String,
-        _holder_key: &EncodingKey,
+        holder_key: &EncodingKey,
         sign_alg: Option<String>,
     ) -> Result<()> {
-        let _alg = sign_alg.unwrap_or_else(|| DEFAULT_SIGNING_ALG.to_string());
+        let alg = sign_alg.unwrap_or_else(|| DEFAULT_SIGNING_ALG.to_string());
         // Set key-binding fields
         self.key_binding_jwt_header
-            .insert("alg".to_string(), _alg.clone().into());
+            .insert("alg".to_string(), alg.clone().into());
         self.key_binding_jwt_header
             .insert("typ".to_string(), crate::KB_JWT_TYP_HEADER.into());
         self.key_binding_jwt_payload
@@ -294,34 +295,32 @@ impl SDJWTHolder {
             .insert("aud".to_string(), aud.into());
         let timestamp = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)
-            .map_err(|e| Error::ConversionError(format!("timestamp: {}", e.to_string())))?
+            .map_err(|e| Error::ConversionError(format!("timestamp: {}", e)))?
             .as_secs();
         self.key_binding_jwt_payload
             .insert("iat".to_string(), timestamp.into());
-        self._set_key_binding_digest_key()?;
+        self.set_key_binding_digest_key()?;
         // Create key-binding jwt
         let mut header = Header::new(
-            Algorithm::from_str(_alg.as_str())
+            Algorithm::from_str(alg.as_str())
                 .map_err(|e| Error::DeserializationError(e.to_string()))?,
         );
         header.typ = Some(crate::KB_JWT_TYP_HEADER.into());
         self.serialized_key_binding_jwt =
-            jsonwebtoken::encode(&header, &self.key_binding_jwt_payload, &_holder_key)
+            jsonwebtoken::encode(&header, &self.key_binding_jwt_payload, holder_key)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?;
         Ok(())
     }
 
-    fn _set_key_binding_digest_key(&mut self) -> Result<()> {
+    fn set_key_binding_digest_key(&mut self) -> Result<()> {
         let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 1);
         combined.push(&self.serialized_sd_jwt);
         combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
         let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
-        let _sd_hash = base64_hash(combined.as_bytes());
-        let _sd_hash = serde_json::to_value(&_sd_hash)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let sd_hash = base64_hash(combined.as_bytes());
         self.key_binding_jwt_payload
-            .insert(KB_DIGEST_KEY.to_owned(), _sd_hash);
+            .insert(KB_DIGEST_KEY.to_owned(), Value::String(sd_hash));
 
         Ok(())
     }

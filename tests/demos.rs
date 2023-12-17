@@ -303,7 +303,7 @@ fn demo_positive_cases(
     ).unwrap();
     let issued = sd_jwt.clone();
     // Holder creates presentation
-    let holder = SDJWTHolder::new(sd_jwt.clone(), format.clone()).unwrap();
+    let mut holder = SDJWTHolder::new(sd_jwt.clone(), format.clone()).unwrap();
     let presentation = holder.create_presentation(
         holder_disclosed_claims,
         nonce.clone(),
