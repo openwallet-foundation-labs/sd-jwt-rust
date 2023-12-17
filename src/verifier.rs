@@ -68,7 +68,7 @@ impl SDJWTVerifier {
             ));
         }
 
-        return Ok(verifier);
+        Ok(verifier)
     }
 
     fn verify_sd_jwt(&mut self, sign_alg: Option<String>) -> Result<()> {
@@ -94,19 +94,14 @@ impl SDJWTVerifier {
             &issuer_public_key,
             &Validation::new(Algorithm::ES256),
         )
-            .map_err(|e| Error::DeserializationError(format!("Cannot decode jwt: {}", e.to_string())))?
+            .map_err(|e| Error::DeserializationError(format!("Cannot decode jwt: {}", e)))?
             .claims;
 
         let _ = sign_alg; //FIXME check algo
 
         self.sd_jwt_payload = claims;
-        self._holder_public_key_payload = if let Some(holder_public_key_payload) =
-            self.sd_jwt_payload.get(CNF_KEY).and_then(Value::as_object)
-        {
-            Some(holder_public_key_payload.clone())
-        } else {
-            None
-        };
+        self._holder_public_key_payload = self.sd_jwt_payload.get(CNF_KEY)
+            .and_then(Value::as_object).cloned();
 
         Ok(())
     }
@@ -158,14 +153,8 @@ impl SDJWTVerifier {
                 validation.set_audience(&[expected_aud.as_str()]);
                 validation.set_required_spec_claims(&["aud"]);
 
-                let jwt = jsonwebtoken::decode::<Map<String, Value>>(
-                    payload.as_str(),
-                    &pubkey,
-                    &validation,
-                )
-                    .map_err(|e| Error::DeserializationError(e.to_string()))?;
-
-                jwt
+                jsonwebtoken::decode::<Map<String, Value>>(payload.as_str(), &pubkey, &validation)
+                    .map_err(|e| Error::DeserializationError(e.to_string()))?
             }
             None => {
                 return Err(Error::InvalidState(
@@ -226,7 +215,7 @@ impl SDJWTVerifier {
 
         self.duplicate_hash_check = Vec::new();
         let claims: Value = self.sd_jwt_payload.clone().into_iter().collect();
-        Ok(self.unpack_disclosed_claims(&claims)?)
+        self.unpack_disclosed_claims(&claims)
     }
 
     fn unpack_disclosed_claims(&mut self, sd_jwt_claims: &Value) -> Result<Value> {
@@ -246,8 +235,7 @@ impl SDJWTVerifier {
                     let claim = self.unpack_disclosed_claims(value)?;
                     claims.push(claim);
                 }
-                return Ok(serde_json::to_value(claims)
-                    .map_err(|e| Error::DeserializationError(e.to_string()))?);
+                return Ok(Value::Array(claims));
             }
             Value::Object(obj) => obj,
         };
@@ -344,13 +332,8 @@ mod tests {
             "compact".to_owned(),
         ).unwrap();
         let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned()).unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            ).unwrap();
+            .create_presentation(user_claims.as_object().unwrap().clone(),
+                None, None, None, None).unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
@@ -417,13 +400,8 @@ mod tests {
         claims_to_disclose["nationalities"] =
             Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
         let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned()).unwrap()
-            .create_presentation(
-                claims_to_disclose.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            ).unwrap();
+            .create_presentation(claims_to_disclose.as_object().unwrap().clone(),
+                None, None, None, None).unwrap();
 
         let verified_claims = SDJWTVerifier::new(
             presentation.clone(),
