@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
+
 use error::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, verifier::SDJWTVerifier};
@@ -20,8 +22,6 @@ const SD_LIST_PREFIX: &str = "...";
 const _SD_JWT_TYP_HEADER: &str = "sd+jwt";
 const KB_JWT_TYP_HEADER: &str = "kb+jwt";
 const KB_DIGEST_KEY: &str = "_sd_hash";
-const JWS_KEY_DISCLOSURES: &str = "disclosures";
-const JWS_KEY_KB_JWT: &str = "kb_jwt";
 pub const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
 const JWT_SEPARATOR: &str = ".";
 const CNF_KEY: &str = "cnf";
@@ -38,10 +38,20 @@ pub(crate) struct SDJWTCommon {
     serialization_format: String,
     unverified_input_key_binding_jwt: Option<String>,
     unverified_sd_jwt: Option<String>,
+    unverified_sd_jwt_json: Option<SDJWTJson>,
     unverified_input_sd_jwt_payload: Option<Map<String, Value>>,
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
     input_disclosures: Vec<String>,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+pub struct SDJWTJson {
+    protected: String,
+    payload: String,
+    signature: String,
+    pub disclosures: Vec<String>,
+    pub kb_jwt: Option<String>,
 }
 
 // Define the SDJWTCommon struct to hold common properties.
@@ -150,25 +160,19 @@ impl SDJWTCommon {
             self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(jwt_body)?);
             Ok(())
         } else {
-            // If the SD-JWT is in JSON format, parse the JSON and extract the disclosures.
-            let unverified_input_sd_jwt_parsed: Value =
-                serde_json::from_str(&sd_jwt_with_disclosures)
-                    .map_err(|e| Error::DeserializationError(e.to_string()))?;
-            self.unverified_input_key_binding_jwt = unverified_input_sd_jwt_parsed
-                .get(JWS_KEY_KB_JWT)
-                .map(Value::to_string);
-            self.input_disclosures = unverified_input_sd_jwt_parsed[JWS_KEY_DISCLOSURES]
-                .as_array()
-                .ok_or(Error::ConversionError(
-                    "Cannot convert `disclosures` to array".to_string(),
-                ))?
-                .iter()
-                .map(Value::to_string)
-                .collect();
-            let payload = unverified_input_sd_jwt_parsed["payload"]
-                .as_str()
-                .ok_or(Error::KeyNotFound("payload".to_string()))?;
-            self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(payload)?);
+            let parsed_sd_jwt_json: SDJWTJson = serde_json::from_str(&sd_jwt_with_disclosures)
+                .map_err(|e| Error::DeserializationError(e.to_string()))?;
+            self.unverified_sd_jwt_json = Some(parsed_sd_jwt_json.clone());
+            self.unverified_input_key_binding_jwt = parsed_sd_jwt_json.kb_jwt;
+            self.input_disclosures = parsed_sd_jwt_json.disclosures;
+            self.unverified_input_sd_jwt_payload =
+                Some(jwt_payload_decode(&parsed_sd_jwt_json.payload)?);
+            self.unverified_sd_jwt = Some(format!(
+                "{}.{}.{}",
+                parsed_sd_jwt_json.protected,
+                parsed_sd_jwt_json.payload,
+                parsed_sd_jwt_json.signature
+            ));
             Ok(())
         }
     }
