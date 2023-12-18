@@ -302,17 +302,17 @@ fn demo_positive_cases(
         sign_algo.clone(),
         add_decoy,
         format.clone(),
-    );
+    ).unwrap();
     let issued = sd_jwt.serialized_sd_jwt.clone();
     // Holder creates presentation
-    let holder = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), format.clone());
+    let holder = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), format.clone()).unwrap();
     let presentation = holder.create_presentation(
         holder_disclosed_claims,
         nonce.clone(),
         aud.clone(),
         holder_key,
         sign_algo,
-    );
+    ).unwrap();
 
     let mut issued_parts: HashSet<&str> = issued
         .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
@@ -344,6 +344,5 @@ fn demo_positive_cases(
         aud,
         nonce,
         format,
-    )
-        .unwrap();
+    ).unwrap();
 }
