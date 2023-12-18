@@ -1,4 +1,4 @@
-use crate::error;
+use crate::{error, SDJWTJson};
 use error::{Error, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Map, Value};
@@ -21,7 +21,7 @@ pub struct SDJWTHolder {
     serialized_key_binding_jwt: String,
     sd_jwt_payload: Map<String, Value>,
     serialized_sd_jwt: String,
-    sd_jwt: String,
+    sd_jwt_json: Option<SDJWTJson>,
 }
 
 impl SDJWTHolder {
@@ -36,7 +36,7 @@ impl SDJWTHolder {
 
         let mut holder = SDJWTHolder {
             sd_jwt_engine: SDJWTCommon {
-                serialization_format,
+                serialization_format: serialization_format.clone(),
                 ..Default::default()
             },
             hs_disclosures: Vec::new(),
@@ -45,10 +45,12 @@ impl SDJWTHolder {
             serialized_key_binding_jwt: "".to_string(),
             sd_jwt_payload: Map::new(),
             serialized_sd_jwt: "".to_string(),
-            sd_jwt: "".to_string(),
+            sd_jwt_json: None,
         };
 
-        holder.sd_jwt_engine.parse_sd_jwt(sd_jwt_with_disclosures)?;
+        holder
+            .sd_jwt_engine
+            .parse_sd_jwt(sd_jwt_with_disclosures.clone())?;
 
         //TODO Verify signature before accepting the JWT
         holder.sd_jwt_payload = holder
@@ -61,6 +63,7 @@ impl SDJWTHolder {
             .unverified_sd_jwt
             .take()
             .ok_or(Error::InvalidState("Cannot take jwt".to_string()))?;
+        holder.sd_jwt_json = holder.sd_jwt_engine.unverified_sd_jwt_json.clone();
 
         holder.sd_jwt_engine.create_hash_mappings()?;
 
@@ -100,19 +103,15 @@ impl SDJWTHolder {
             let joined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
             joined.to_string()
         } else {
-            let mut sd_jwt_parsed: Map<String, Value> = serde_json::from_str(&self.sd_jwt)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?;
-            sd_jwt_parsed.insert(
-                crate::JWS_KEY_DISCLOSURES.to_owned(),
-                self.hs_disclosures.clone().into(),
-            );
+            let mut sd_jwt_json = self
+                .sd_jwt_json
+                .take()
+                .ok_or(Error::InvalidState("Cannot take SDJWTJson".to_string()))?;
+            sd_jwt_json.disclosures = self.hs_disclosures.clone();
             if !self.serialized_key_binding_jwt.is_empty() {
-                sd_jwt_parsed.insert(
-                    crate::JWS_KEY_KB_JWT.to_owned(),
-                    self.serialized_key_binding_jwt.clone().into(),
-                );
+                sd_jwt_json.kb_jwt = Some(self.serialized_key_binding_jwt.clone());
             }
-            serde_json::to_string(&sd_jwt_parsed)
+            serde_json::to_string(&sd_jwt_json)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?
         };
 

@@ -1,4 +1,4 @@
-use crate::error;
+use crate::{error, SDJWTJson};
 use error::Result;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
@@ -279,13 +279,6 @@ impl SDJWTIssuer {
         self.signed_sd_jwt = jsonwebtoken::encode(&header, &self.sd_jwt_payload, &self.issuer_key)
             .map_err(|e| Error::DeserializationError(e.to_string()))?;
 
-        if self.inner.serialization_format == "json" {
-            unimplemented!("json serialization is not supported for issuance");
-            // let  jws_content = serde_json::from_str(&self.serialized_sd_jwt).unwrap();
-            // jws_content.insert(JWS_KEY_DISCLOSURES.to_string(), self.ii_disclosures.iter().map(|d| d.b64.to_string()).collect());
-            // self.serialized_sd_jwt = serde_json::to_string(&jws_content).unwrap();
-        }
-
         Ok(())
     }
 
@@ -306,7 +299,26 @@ impl SDJWTIssuer {
                 COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
             );
         } else if self.inner.serialization_format == "json" {
-            self.serialized_sd_jwt = self.signed_sd_jwt.clone();
+            let jwt: Vec<&str> = self.signed_sd_jwt.split('.').collect();
+            if jwt.len() != 3 {
+                return Err(Error::InvalidInput(format!(
+                    "Invalid JWT, JWT must contain three parts after splitting with \".\": jwt {}",
+                    self.signed_sd_jwt
+                )));
+            }
+            let sd_jwt_json = SDJWTJson {
+                protected: jwt[0].to_owned(),
+                payload: jwt[1].to_owned(),
+                signature: jwt[2].to_owned(),
+                kb_jwt: None,
+                disclosures: self
+                    .all_disclosures
+                    .iter()
+                    .map(|d| d.raw_b64.to_string())
+                    .collect(),
+            };
+            self.serialized_sd_jwt = serde_json::to_string(&sd_jwt_json)
+                .map_err(|e| Error::DeserializationError(e.to_string()))?;
         } else {
             return Err(Error::InvalidInput(
                 format!("Unknown serialization format {}, only \"compact\" or \"json\" formats are supported", self.inner.serialization_format)

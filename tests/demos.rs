@@ -8,7 +8,7 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
-use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier};
+use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier};
 use sd_jwt_rs::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -287,7 +287,7 @@ fn demo_positive_cases(
         Option<EncodingKey>,
         Option<Jwk>,
     ),
-    #[values("compact".to_string())] format: String,
+    #[values("compact".to_string(), "json".to_string())] format: String,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
@@ -300,38 +300,62 @@ fn demo_positive_cases(
         holder_jwk.clone(),
         add_decoy,
         format.clone(),
-    ).unwrap();
+    )
+        .unwrap();
     let issued = sd_jwt.clone();
     // Holder creates presentation
     let mut holder = SDJWTHolder::new(sd_jwt.clone(), format.clone()).unwrap();
-    let presentation = holder.create_presentation(
-        holder_disclosed_claims,
-        nonce.clone(),
-        aud.clone(),
-        holder_key,
-        sign_algo,
-    ).unwrap();
+    let presentation = holder
+        .create_presentation(
+            holder_disclosed_claims,
+            nonce.clone(),
+            aud.clone(),
+            holder_key,
+            sign_algo,
+        )
+        .unwrap();
 
-    let mut issued_parts: HashSet<&str> = issued
-        .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
-        .collect();
-    issued_parts.remove("");
+    if format == "compact" {
+        let mut issued_parts: HashSet<&str> = issued
+            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .collect();
+        issued_parts.remove("");
 
-    let mut revealed_parts: HashSet<&str> = presentation
-        .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
-        .collect();
-    revealed_parts.remove("");
+        let mut revealed_parts: HashSet<&str> = presentation
+            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .collect();
+        revealed_parts.remove("");
 
-    let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
-    // Compare that number of disclosed parts are equal
-    let mut revealed_parts_number = revealed_parts.len();
-    if holder_jwk.is_some() {
-        // Remove KB
-        revealed_parts_number -= 1;
+        let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
+        // Compare that number of disclosed parts are equal
+        let mut revealed_parts_number = revealed_parts.len();
+        if holder_jwk.is_some() {
+            // Remove KB
+            revealed_parts_number -= 1;
+        }
+        assert_eq!(intersected_parts.len(), revealed_parts_number);
+        // here `+1` means adding issued jwt part also
+        assert_eq!(number_of_revealed_sds + 1, revealed_parts_number);
+    } else {
+        let mut issued: SDJWTJson = serde_json::from_str(&issued).unwrap();
+        let mut revealed: SDJWTJson = serde_json::from_str(&presentation).unwrap();
+        let disclosures: Vec<String> = revealed
+            .disclosures
+            .clone()
+            .into_iter()
+            .filter(|d| issued.disclosures.contains(d))
+            .collect();
+        assert_eq!(number_of_revealed_sds, disclosures.len());
+
+        if holder_jwk.is_some() {
+            assert!(revealed.kb_jwt.is_some());
+        }
+
+        issued.disclosures = disclosures;
+        revealed.kb_jwt = None;
+        assert_eq!(revealed, issued);
     }
-    assert_eq!(intersected_parts.len(), revealed_parts_number);
-    // here `+1` means adding issued jwt part also
-    assert_eq!(number_of_revealed_sds + 1, revealed_parts_number);
+
     // Verify presentation
     let _verified = SDJWTVerifier::new(
         presentation.clone(),
@@ -342,5 +366,6 @@ fn demo_positive_cases(
         aud,
         nonce,
         format,
-    ).unwrap();
+    )
+        .unwrap();
 }
