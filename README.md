@@ -1,8 +1,34 @@
 # SD-JWT Rust Reference Implementation
 
 This is the reference implementation of the [IETF SD-JWT specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-selective-disclosure-jwt/) written in Rust.
+Supported version: 6.
 
 Note: while the project is started as a reference implementation, it is intended to be evolved to a production-ready, high-performance implementations in the long-run.
+
+## Usage
+Include the crate in the `[dependencies]` section of your `Cargo.toml`:
+```
+sd-jwt-payload = "0.0.1"
+```
+
+## API
+Note: the current version of the crate is 0.0.x, so the API should be considered as experimental.
+Proposals about API improvements are highly appreciated.
+
+```rust
+fn demo() {
+    let mut issuer = SDJWTIssuer::new(issuer_key, None);
+    let sd_jwt = issuer.issue_sd_jwt(claims, SDJWTClaimsStrategy::Full, holder_key, add_decoy, "compact".to_owned()).unwrap();
+
+    let mut holder = SDJWTHolder::new(sd_jwt, "compact".to_owned()).unwrap();
+    let presentation = holder.create_presentation(claims_to_disclosure, None, None, None, None).unwrap();
+
+    let verified_claims = SDJWTVerifier::new(presentation, cb_to_resolve_issuer_key, None, None, "compact".to_owned()).unwrap()
+                            .verified_claims;
+}
+```
+
+See `tests/demos.rs` for more details;
 
 ## Repository structure
 
@@ -21,25 +47,6 @@ cargo test
 
 ### Interoperability testing tool
 TBD
-
-## API
-Note: the current version of the crate is 0.0.x, so the API should be considered as experimental.
-Proposals about API improvements are highly appreciated.
-
-TBD
-
-## Functionality
-
-Please refer to the list, unchecked items are in progress and will be supported soon
-- [x] Issuance of SD-JWT
-- [x] Presentation of SD-JWT with custom schema
-- [x] Verification of SD-JWT
-- [x] CI pipelines for Ubuntu
-- [ ] Support of multiple hash / sign algorithms
-- [ ] JWT Key Binding support
-- [x] Selective disclosure of arrays elements
-- [ ] Extended error handling
-- [ ] Extended CI/CD
 
 ## External Dependencies
 
