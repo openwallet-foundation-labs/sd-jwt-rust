@@ -294,18 +294,16 @@ fn demo_positive_cases(
     let (user_claims, strategy, holder_disclosed_claims, number_of_revealed_sds) = data;
     let (nonce, aud, holder_key, holder_jwk) = presentation_metadata;
     // Issuer issues SD-JWT
-    let sd_jwt = SDJWTIssuer::issue_sd_jwt(
+    let sd_jwt = SDJWTIssuer::new(issuer_key, sign_algo.clone()).issue_sd_jwt(
         user_claims.clone(),
         strategy,
-        issuer_key,
         holder_jwk.clone(),
-        sign_algo.clone(),
         add_decoy,
         format.clone(),
     ).unwrap();
-    let issued = sd_jwt.serialized_sd_jwt.clone();
+    let issued = sd_jwt.clone();
     // Holder creates presentation
-    let holder = SDJWTHolder::new(sd_jwt.serialized_sd_jwt.clone(), format.clone()).unwrap();
+    let mut holder = SDJWTHolder::new(sd_jwt.clone(), format.clone()).unwrap();
     let presentation = holder.create_presentation(
         holder_disclosed_claims,
         nonce.clone(),
