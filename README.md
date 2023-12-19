@@ -5,12 +5,6 @@ Supported version: 6.
 
 Note: while the project is started as a reference implementation, it is intended to be evolved to a production-ready, high-performance implementations in the long-run.
 
-## Usage
-Include the crate in the `[dependencies]` section of your `Cargo.toml`:
-```
-sd-jwt-payload = "0.0.1"
-```
-
 ## API
 Note: the current version of the crate is 0.0.x, so the API should be considered as experimental.
 Proposals about API improvements are highly appreciated.
@@ -46,12 +40,11 @@ cargo test
 ```
 
 ### Interoperability testing tool
-TBD
+Coming soon (planned for v0.0.4)
 
 ## External Dependencies
 
-Dual license (MIT/Apache 2.0)
-dependencies: [base64](https://crates.io/crates/base64), [lazy_static](https://crates.io/crates/lazy_static) [log](https://crates.io/crates/log), [serde](https://crates.io/crates/serde), [serde_json](https://crates.io/crates/serde_json), [sha2](https://crates.io/crates/sha2), [rand](https://crates.io/crates/rand), [hmac](https://crates.io/crates/hmac), [thiserror](https://crates.io/crates/thiserror).
+Dual license (MIT/Apache 2.0) dependencies: [base64](https://crates.io/crates/base64), [lazy_static](https://crates.io/crates/lazy_static) [log](https://crates.io/crates/log), [serde](https://crates.io/crates/serde), [serde_json](https://crates.io/crates/serde_json), [sha2](https://crates.io/crates/sha2), [rand](https://crates.io/crates/rand), [hmac](https://crates.io/crates/hmac), [thiserror](https://crates.io/crates/thiserror).
 MIT license dependencies: [jsonwebtoken](https://crates.io/crates/jsonwebtoken), [strum](https://crates.io/crates/strum)
 
 Note: the list of dependencies may be changed in the future.
@@ -60,9 +53,3 @@ Note: the list of dependencies may be changed in the future.
 
 - Sergey Minaev ([Github](https://github.com/jovfer))
 - DSR Corporation Decentralized Systems Team ([Github](https://github.com/orgs/DSRCorporation/teams/decentralized-systems))
-
-## To Be Completed by Maintainers
-- [x] Create MAINTAINERS.md file using the [format documented on the TAC site](https://tac.openwallet.foundation/governance/maintainers-file-content/).
-- [ ] Create a CONTRIBUTING.md file that documents steps for contributing to the project
-- [X] Create a CODEOWNERS file
-- [X] Update the README.md file as necessary
