@@ -1,12 +1,13 @@
 [package]
 name = "sd-jwt-rs"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "Rust reference implementation of the IETF SD-JWT specification (v6)."
 rust-version = "1.74.0"
 authors = ["Sergey Minaev <sergey.minaev@dsr-corporation.com>"]
 repository = "https://github.com/openwallet-foundation-labs/sd-jwt-rust"
+homepage = "https://github.com/openwallet-foundation-labs/sd-jwt-rust"
 
 [dependencies]
 base64 = "0.21"
