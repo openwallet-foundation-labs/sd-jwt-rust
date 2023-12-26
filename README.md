@@ -40,7 +40,7 @@ cargo test
 ```
 
 ### Interoperability testing tool
-Coming soon (planned for v0.0.5)
+Coming soon (planned for v0.0.6)
 
 ## External Dependencies
 
