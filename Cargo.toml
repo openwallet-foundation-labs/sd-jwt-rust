@@ -1,6 +1,6 @@
 [package]
 name = "sd-jwt-rs"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "Rust reference implementation of the IETF SD-JWT specification (v6)."
@@ -24,3 +24,4 @@ strum = { version = "0.25", default-features = false, features = ["std", "derive
 
 [dev-dependencies]
 rstest = "0.18.2"
+regex = "1.10"
