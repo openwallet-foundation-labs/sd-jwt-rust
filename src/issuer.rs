@@ -47,9 +47,20 @@ pub enum SDJWTClaimsStrategy<'a> {
     Partial(Vec<&'a str>),
 }
 
-// {
-// let strategy = Partial(vec!["$.address", "$.address.street_address"])
-// }
+/// SDJWTClaimsStrategy is used to determine which claims can be selectively disclosed later by the holder.
+///
+/// The following strategies are supported:
+/// * No: No claims can be selectively disclosed.
+/// * Flat: Top-level claims can be selectively disclosed, nested objects are fully disclosed.
+/// * Full: All claims can be selectively disclosed.
+/// * Partial: Claims can be selectively disclosed based on the provided JSONPaths.
+/// 
+/// # Examples
+/// ```
+/// use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
+///
+/// let strategy = SDJWTClaimsStrategy::Partial(vec!["$.address", "$.address.street_address"]);
+/// ```
 impl<'a> SDJWTClaimsStrategy<'a> {
     fn finalize_input(&mut self) -> Result<()> {
         match self {
@@ -108,7 +119,17 @@ impl SDJWTIssuer {
     const DECOY_MIN_ELEMENTS: u32 = 2;
     const DECOY_MAX_ELEMENTS: u32 = 5;
 
-    pub fn new(issuer_key: EncodingKey,sign_alg: Option<String>) -> Self {
+    /// Creates a new SDJWTIssuer instance.
+    ///
+    /// The instance can be used mutliple times to issue SD-JWTs.
+    ///
+    /// # Arguments
+    /// * `issuer_key` - The key used to sign the SD-JWT.
+    /// * `sign_alg` - The signing algorithm used to sign the SD-JWT. If not provided, the default algorithm is used.
+    ///
+    /// # Returns
+    /// A new SDJWTIssuer instance.
+    pub fn new(issuer_key: EncodingKey, sign_alg: Option<String>) -> Self {
         SDJWTIssuer {
             sign_alg: sign_alg.unwrap_or(DEFAULT_SIGNING_ALG.to_owned()),
             add_decoy_claims: false,
@@ -131,6 +152,17 @@ impl SDJWTIssuer {
         self.serialized_sd_jwt = Default::default();
     }
 
+    /// Issues a SD-JWT.
+    ///
+    /// # Arguments
+    /// * `user_claims` - The claims to be included in the SD-JWT.
+    /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See SDJWTClaimsStrategy for more details.
+    /// * `holder_key` - The key used to sign the SD-JWT. If not provided, no key binding is added to the SD-JWT.
+    /// * `add_decoy_claims` - If true, decoy claims are added to the SD-JWT.
+    /// * `serialization_format` - The serialization format to be used for the SD-JWT. Only "compact" and "json" formats are supported.
+    ///
+    /// # Returns
+    /// The issued SD-JWT as a string in the requested serialization format.
     pub fn issue_sd_jwt(
         &mut self,
         user_claims: Value,

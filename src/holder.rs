@@ -25,6 +25,19 @@ pub struct SDJWTHolder {
 }
 
 impl SDJWTHolder {
+    /// Build an instance of holder to create one or more presentations based on SD JWT provided by issuer.
+    ///
+    /// # Arguments
+    /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`
+    /// * `serialization_format` - Serialization format of the SD JWT. Supported values are `compact` and `json`
+    ///
+    /// # Returns
+    /// * `SDJWTHolder` - Instance of SDJWTHolder
+    ///
+    /// # Errors
+    /// * `InvalidInput` - If the serialization format is not supported
+    /// * `InvalidState` - If the SD JWT data is not valid
+    /// * `DeserializationError` - If the SD JWT serialization is not valid
     pub fn new(sd_jwt_with_disclosures: String, serialization_format: String) -> Result<Self> {
         let serialization_format = serialization_format.to_lowercase();
         if serialization_format != "compact" && serialization_format != "json" {
@@ -70,6 +83,17 @@ impl SDJWTHolder {
         Ok(holder)
     }
 
+    /// Create a presentation based on the SD JWT provided by issuer.
+    ///
+    /// # Arguments
+    /// * `claims_to_disclose` - Claims to disclose in the presentation
+    /// * `nonce` - Nonce to be used in the key-binding JWT
+    /// * `aud` - Audience to be used in the key-binding JWT
+    /// * `holder_key` - Key to sign the key-binding JWT
+    /// * `sign_alg` - Signing algorithm to be used in the key-binding JWT
+    ///
+    /// # Returns
+    /// * `String` - Presentation in the format specified by `serialization_format` in the constructor. It can be either compact or json.
     pub fn create_presentation(
         &mut self,
         claims_to_disclose: Map<String, Value>,

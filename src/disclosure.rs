@@ -29,3 +29,28 @@ impl SDJWTDisclosure  {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::base64url_decode;
+    use regex::Regex;
+
+
+    #[test]
+    fn test_sdjwt_disclosure_when_key_is_none() {
+        let sdjwt_disclosure = SDJWTDisclosure::new(None, "test");
+        let decoded_disclosure: String = String::from_utf8(base64url_decode(&sdjwt_disclosure.raw_b64).unwrap()).unwrap();
+
+        let re = Regex::new(r#"\[".*", test]"#).unwrap();
+        assert!(re.is_match(&decoded_disclosure));
+    }
+
+    #[test]
+    fn test_sdjwt_disclosure_when_key_is_present() {
+        let sdjwt_disclosure = SDJWTDisclosure::new(Some("key".to_string()), "test");
+        let decoded = String::from_utf8(base64url_decode(&sdjwt_disclosure.raw_b64).unwrap()).unwrap();
+
+        let re = Regex::new(r#"\[".*", "key", test]"#).unwrap();
+        assert!(re.is_match(&decoded));    }
+}
