@@ -36,31 +36,24 @@ pub struct SDJWTIssuer {
     pub serialized_sd_jwt: String,
 }
 
+/// SDJWTClaimsStrategy is used to determine which claims can be selectively disclosed later by the holder.
 pub enum SDJWTClaimsStrategy<'a> {
-    // Full disclosure
+    /// No claims can be selectively disclosed. Full disclosure.
     No,
-    // Top-level selective disclosure, nested objects as full disclosure
+    /// Top-level claims can be selectively disclosed, nested objects are fully disclosed.
     Flat,
-    // Full recursive selective disclosure
+    /// All claims can be selectively disclosed (recursively including nested objects).
     Full,
-    //TODO gather JSONPaths to point the claims to be SD
+    /// Claims can be selectively disclosed based on the provided JSONPaths. Other claims are fully disclosed.
+    /// # Examples
+    /// ```
+    /// use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
+    ///
+    /// let strategy = SDJWTClaimsStrategy::Partial(vec!["$.address", "$.address.street_address"]);
+    /// ```
     Partial(Vec<&'a str>),
 }
 
-/// SDJWTClaimsStrategy is used to determine which claims can be selectively disclosed later by the holder.
-///
-/// The following strategies are supported:
-/// * No: No claims can be selectively disclosed.
-/// * Flat: Top-level claims can be selectively disclosed, nested objects are fully disclosed.
-/// * Full: All claims can be selectively disclosed.
-/// * Partial: Claims can be selectively disclosed based on the provided JSONPaths.
-/// 
-/// # Examples
-/// ```
-/// use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
-///
-/// let strategy = SDJWTClaimsStrategy::Partial(vec!["$.address", "$.address.street_address"]);
-/// ```
 impl<'a> SDJWTClaimsStrategy<'a> {
     fn finalize_input(&mut self) -> Result<()> {
         match self {
@@ -156,7 +149,7 @@ impl SDJWTIssuer {
     ///
     /// # Arguments
     /// * `user_claims` - The claims to be included in the SD-JWT.
-    /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See SDJWTClaimsStrategy for more details.
+    /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See [SDJWTClaimsStrategy] for more details.
     /// * `holder_key` - The key used to sign the SD-JWT. If not provided, no key binding is added to the SD-JWT.
     /// * `add_decoy_claims` - If true, decoy claims are added to the SD-JWT.
     /// * `serialization_format` - The serialization format to be used for the SD-JWT. Only "compact" and "json" formats are supported.
