@@ -12,7 +12,7 @@ use serde_json::{json, Map as SJMap, Map};
 
 use crate::disclosure::SDJWTDisclosure;
 use crate::error::Error;
-use crate::utils::{base64_hash, generate_salt};
+use crate::utils::{base64_hash, generate_salt, wrap_sd_key};
 use crate::{
     SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
     DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
@@ -80,14 +80,11 @@ impl<'a> SDJWTClaimsStrategy<'a> {
                 let next_sd_keys = sd_keys
                     .iter()
                     .filter_map(|str| {
-                        str.strip_prefix(key).as_mut().map(|claim| {
+                        let key = wrap_sd_key(key);
+                        str.strip_prefix(&key).as_mut().map(|claim| {
                             if let Some(next_claim) = claim.strip_prefix('.') {
                                 next_claim
                             } else {
-                                // FIXME Replace to non-leackable impl
-                                // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
-                                // For example: [0].street -> 0.street
-                                *claim = claim.replace(['[', ']'], "").leak();
                                 claim
                             }
                         })
@@ -103,7 +100,7 @@ impl<'a> SDJWTClaimsStrategy<'a> {
             Self::No => false,
             Self::Flat => true,
             Self::Full => true,
-            Self::Partial(sd_keys) => sd_keys.contains(&key),
+            Self::Partial(sd_keys) => sd_keys.contains(&&*wrap_sd_key(key)),
         }
     }
 }
