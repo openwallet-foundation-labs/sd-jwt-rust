@@ -57,3 +57,11 @@ pub(crate) fn jwt_payload_decode(b64data: &str) -> Result<serde_json::Map<String
     )
         .map_err(|e| DeserializationError(e.to_string()))
 }
+
+pub(crate) fn wrap_sd_key(key: &str) -> String {
+    if key.parse::<u64>().is_ok() {
+        format!("[{}]", key)
+    } else {
+        key.to_owned()
+    }
+}
