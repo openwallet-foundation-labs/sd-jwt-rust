@@ -367,6 +367,57 @@ mod tests {
     }
 
     #[test]
+    fn verify_noclaim_presentation() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+            }
+        });
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
+            user_claims.clone(),
+            SDJWTClaimsStrategy::No,
+            None,
+            false,
+            "compact".to_owned(),
+        )
+            .unwrap();
+
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned())
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(sd_jwt, presentation);
+        let verified_claims = SDJWTVerifier::new(
+            presentation,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            None,
+            None,
+            "compact".to_owned(),
+        )
+            .unwrap()
+            .verified_claims;
+        assert_eq!(user_claims, verified_claims);
+    }
+
+    #[test]
     fn verify_arrayed_presentation() {
         let user_claims = json!(
             {
