@@ -118,7 +118,7 @@ impl SDJWTCommon {
             let parts: Vec<&str> = sd_jwt_with_disclosures
                 .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
                 .collect();
-            if parts.len() < 3 {
+            if parts.len() < 2 { // minimal number of SD-JWT parts according to the standard
                 return Err(Error::InvalidInput(format!(
                     "Invalid SD-JWT length: {}",
                     parts.len()
