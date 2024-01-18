@@ -181,8 +181,8 @@ impl SDJWTVerifier {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
         if self.sd_jwt_engine.serialization_format == "compact" {
-            let _sd_hash = self._get_key_binding_digest_hash()?;
-            if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(_sd_hash)) {
+            let sd_hash = self._get_key_binding_digest_hash()?;
+            if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
                 return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
             }
         }

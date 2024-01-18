@@ -1,7 +1,7 @@
 # SD-JWT Rust Reference Implementation
 
 This is the reference implementation of the [IETF SD-JWT specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-selective-disclosure-jwt/) written in Rust.
-Supported version: 6.
+Supported version: 7.
 
 Note: while the project is started as a reference implementation, it is intended to be evolved to a production-ready, high-performance implementations in the long-run.
 

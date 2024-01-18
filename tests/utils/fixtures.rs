@@ -131,7 +131,7 @@ pub const W3C_VC_CLAIMS: &str = r#"{
   "jti": "http://example.com/credentials/3732",
   "iat": 1683000000,
   "exp": 1883000000,
-  "type": "IdentityCredential",
+  "vct": "IdentityCredential",
   "credentialSubject": {
     "given_name": "John",
     "family_name": "Doe",
