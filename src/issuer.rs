@@ -16,6 +16,7 @@ use crate::utils::{base64_hash, generate_salt};
 use crate::{
     SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
     DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
+    SDJWTSerializationFormat,
 };
 
 pub struct SDJWTIssuer {
@@ -143,7 +144,7 @@ impl SDJWTIssuer {
     /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See [SDJWTClaimsStrategy] for more details.
     /// * `holder_key` - The key used to sign the SD-JWT. If not provided, no key binding is added to the SD-JWT.
     /// * `add_decoy_claims` - If true, decoy claims are added to the SD-JWT.
-    /// * `serialization_format` - The serialization format to be used for the SD-JWT. Only "compact" and "json" formats are supported.
+    /// * `serialization_format` - The serialization format to be used for the SD-JWT.
     ///
     /// # Returns
     /// The issued SD-JWT as a string in the requested serialization format.
@@ -153,7 +154,7 @@ impl SDJWTIssuer {
         mut sd_strategy: SDJWTClaimsStrategy,
         holder_key: Option<Jwk>,
         add_decoy_claims: bool,
-        serialization_format: String,
+        serialization_format: SDJWTSerializationFormat,
         // extra_header_parameters: Option<HashMap<String, String>>,
     ) -> Result<String> {
         let inner = SDJWTCommon {
@@ -299,7 +300,7 @@ impl SDJWTIssuer {
     }
 
     fn create_combined(&mut self) -> Result<()> {
-        if self.inner.serialization_format == "compact" {
+        if self.inner.serialization_format == SDJWTSerializationFormat::Compact {
             let mut disclosures: VecDeque<String> = self
                 .all_disclosures
                 .iter()
@@ -314,7 +315,7 @@ impl SDJWTIssuer {
                 disclosures.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR),
                 COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
             );
-        } else if self.inner.serialization_format == "json" {
+        } else if self.inner.serialization_format == SDJWTSerializationFormat::JSON {
             let jwt: Vec<&str> = self.signed_sd_jwt.split('.').collect();
             if jwt.len() != 3 {
                 return Err(Error::InvalidInput(format!(
@@ -337,7 +338,7 @@ impl SDJWTIssuer {
                 .map_err(|e| Error::DeserializationError(e.to_string()))?;
         } else {
             return Err(Error::InvalidInput(
-                format!("Unknown serialization format {}, only \"compact\" or \"json\" formats are supported", self.inner.serialization_format)
+                format!("Unknown serialization format {}, only \"Compact\" or \"JSON\" formats are supported", self.inner.serialization_format)
             ));
         }
 
@@ -357,7 +358,7 @@ mod tests {
     use serde_json::json;
 
     use crate::issuer::SDJWTClaimsStrategy;
-    use crate::SDJWTIssuer;
+    use crate::{SDJWTIssuer, SDJWTSerializationFormat};
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
 
@@ -382,7 +383,7 @@ mod tests {
             SDJWTClaimsStrategy::Full,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
         trace!("{:?}", sd_jwt)

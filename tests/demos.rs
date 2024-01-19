@@ -8,7 +8,7 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
-use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier};
+use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
 use sd_jwt_rs::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -287,7 +287,7 @@ fn demo_positive_cases(
         Option<EncodingKey>,
         Option<Jwk>,
     ),
-    #[values("compact".to_string(), "json".to_string())] format: String,
+    #[values(SDJWTSerializationFormat::Compact, SDJWTSerializationFormat::JSON)] format: SDJWTSerializationFormat,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
@@ -315,7 +315,7 @@ fn demo_positive_cases(
         )
         .unwrap();
 
-    if format == "compact" {
+    if format == SDJWTSerializationFormat::Compact {
         let mut issued_parts: HashSet<&str> = issued
             .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             .collect();

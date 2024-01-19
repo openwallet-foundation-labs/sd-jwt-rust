@@ -4,6 +4,7 @@ use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
 use error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use strum::Display;
 use std::collections::HashMap;
 pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, issuer::SDJWTClaimsStrategy, verifier::SDJWTVerifier};
 
@@ -32,10 +33,20 @@ pub(crate) struct SDJWTHasSDClaimException(String);
 
 impl SDJWTHasSDClaimException {}
 
+/// SDJWTSerializationFormat is used to determine how an SD-JWT is serialized to String
+#[derive(Default, Clone, PartialEq, Debug, Display)]
+pub enum SDJWTSerializationFormat {
+    /// JSON-encoded representation
+    #[default]
+    JSON,
+    /// Base64-encoded representation
+    Compact,
+}
+
 #[derive(Default)]
 pub(crate) struct SDJWTCommon {
     typ: Option<String>,
-    serialization_format: String,
+    serialization_format: SDJWTSerializationFormat,
     unverified_input_key_binding_jwt: Option<String>,
     unverified_sd_jwt: Option<String>,
     unverified_sd_jwt_json: Option<SDJWTJson>,
@@ -114,7 +125,7 @@ impl SDJWTCommon {
     }
 
     fn parse_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
-        if self.get_serialization_format() == "compact" {
+        if self.get_serialization_format() == &SDJWTSerializationFormat::Compact {
             let parts: Vec<&str> = sd_jwt_with_disclosures
                 .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
                 .collect();
@@ -177,7 +188,7 @@ impl SDJWTCommon {
         }
     }
 
-    fn get_serialization_format(&self) -> &str {
+    fn get_serialization_format(&self) -> &SDJWTSerializationFormat {
         &self.serialization_format
     }
 }
