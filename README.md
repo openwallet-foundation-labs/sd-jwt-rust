@@ -12,12 +12,12 @@ Proposals about API improvements are highly appreciated.
 ```rust
 fn demo() {
     let mut issuer = SDJWTIssuer::new(issuer_key, None);
-    let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_key, add_decoy, "compact".to_owned()).unwrap();
+    let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_key, add_decoy, SDJWTSerializationFormat::Compact).unwrap();
 
-    let mut holder = SDJWTHolder::new(sd_jwt, "compact".to_owned()).unwrap();
+    let mut holder = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact).unwrap();
     let presentation = holder.create_presentation(claims_to_disclosure, None, None, None, None).unwrap();
 
-    let verified_claims = SDJWTVerifier::new(presentation, cb_to_resolve_issuer_key, None, None, "compact".to_owned()).unwrap()
+    let verified_claims = SDJWTVerifier::new(presentation, cb_to_resolve_issuer_key, None, None, SDJWTSerializationFormat::Compact).unwrap()
                             .verified_claims;
 }
 ```
@@ -40,7 +40,7 @@ cargo test
 ```
 
 ### Interoperability testing tool
-Coming soon (planned for v0.0.6)
+Coming soon (planned for v0.0.7)
 
 ## External Dependencies
 
