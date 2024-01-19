@@ -309,7 +309,7 @@ impl SDJWTVerifier {
 
 #[cfg(test)]
 mod tests {
-    use crate::issuer::SDJWTClaimsStrategy;
+    use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier, SDJWTSerializationFormat};
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use serde_json::{json, Value};
@@ -335,7 +335,7 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
             SDJWTSerializationFormat::Compact,
@@ -385,7 +385,7 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::No,
+            ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
             None,
             false,
             SDJWTSerializationFormat::Compact,
@@ -449,7 +449,7 @@ mod tests {
         );
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.name",
             "$.addresses[1]",
             "$.addresses[1].country",

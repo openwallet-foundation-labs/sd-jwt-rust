@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use strum::Display;
 use std::collections::HashMap;
-pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, issuer::SDJWTClaimsStrategy, verifier::SDJWTVerifier};
+pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, issuer::ClaimsForSelectiveDisclosureStrategy, verifier::SDJWTVerifier};
 
 mod disclosure;
 pub mod error;

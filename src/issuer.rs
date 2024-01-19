@@ -37,29 +37,29 @@ pub struct SDJWTIssuer {
     pub serialized_sd_jwt: String,
 }
 
-/// SDJWTClaimsStrategy is used to determine which claims can be selectively disclosed later by the holder.
+/// ClaimsForSelectiveDisclosureStrategy is used to determine which claims can be selectively disclosed later by the holder.
 #[derive(PartialEq, Debug)]
-pub enum SDJWTClaimsStrategy<'a> {
+pub enum ClaimsForSelectiveDisclosureStrategy<'a> {
     /// No claims can be selectively disclosed. Full disclosure.
-    No,
+    NoSDClaims,
     /// Top-level claims can be selectively disclosed, nested objects are fully disclosed.
-    Flat,
+    TopLevel,
     /// All claims can be selectively disclosed (recursively including nested objects).
-    Full,
+    AllLevels,
     /// Claims can be selectively disclosed based on the provided JSONPaths. Other claims are fully disclosed.
     /// # Examples
     /// ```
-    /// use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
+    /// use sd_jwt_rs::issuer::ClaimsForSelectiveDisclosureStrategy;
     ///
-    /// let strategy = SDJWTClaimsStrategy::Partial(vec!["$.address", "$.address.street_address"]);
+    /// let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec!["$.address", "$.address.street_address"]);
     /// ```
-    Partial(Vec<&'a str>),
+    Custom(Vec<&'a str>),
 }
 
-impl<'a> SDJWTClaimsStrategy<'a> {
+impl<'a> ClaimsForSelectiveDisclosureStrategy<'a> {
     fn finalize_input(&mut self) -> Result<()> {
         match self {
-            SDJWTClaimsStrategy::Partial(keys) => {
+            ClaimsForSelectiveDisclosureStrategy::Custom(keys) => {
                 for key in keys.iter_mut() {
                     if let Some(new_key) = key.strip_prefix("$.") {
                         *key = new_key;
@@ -75,27 +75,27 @@ impl<'a> SDJWTClaimsStrategy<'a> {
 
     fn next_level(&self, key: &str) -> Self {
         match self {
-            Self::No => Self::No,
-            Self::Flat => Self::No,
-            Self::Full => Self::Full,
-            Self::Partial(sd_keys) => {
+            Self::NoSDClaims => Self::NoSDClaims,
+            Self::TopLevel => Self::NoSDClaims,
+            Self::AllLevels => Self::AllLevels,
+            Self::Custom(sd_keys) => {
                 let next_sd_keys = sd_keys
                     .iter()
                     .filter_map(|str| {
                         str.strip_prefix(key).and_then(|str| str.strip_prefix('.').or(Some(&str)))
                     })
                     .collect();
-                Self::Partial(next_sd_keys)
+                Self::Custom(next_sd_keys)
             }
         }
     }
 
     fn sd_for_key(&self, key: &str) -> bool {
         match self {
-            Self::No => false,
-            Self::Flat => true,
-            Self::Full => true,
-            Self::Partial(sd_keys) => sd_keys.contains(&key),
+            Self::NoSDClaims => false,
+            Self::TopLevel => true,
+            Self::AllLevels => true,
+            Self::Custom(sd_keys) => sd_keys.contains(&key),
         }
     }
 }
@@ -141,7 +141,7 @@ impl SDJWTIssuer {
     ///
     /// # Arguments
     /// * `user_claims` - The claims to be included in the SD-JWT.
-    /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See [SDJWTClaimsStrategy] for more details.
+    /// * `sd_strategy` - The strategy to be used to determine which claims to be selectively disclosed. See [ClaimsForSelectiveDisclosureStrategy] for more details.
     /// * `holder_key` - The key used to sign the SD-JWT. If not provided, no key binding is added to the SD-JWT.
     /// * `add_decoy_claims` - If true, decoy claims are added to the SD-JWT.
     /// * `serialization_format` - The serialization format to be used for the SD-JWT.
@@ -151,7 +151,7 @@ impl SDJWTIssuer {
     pub fn issue_sd_jwt(
         &mut self,
         user_claims: Value,
-        mut sd_strategy: SDJWTClaimsStrategy,
+        mut sd_strategy: ClaimsForSelectiveDisclosureStrategy,
         holder_key: Option<Jwk>,
         add_decoy_claims: bool,
         serialization_format: SDJWTSerializationFormat,
@@ -181,7 +181,7 @@ impl SDJWTIssuer {
     fn assemble_sd_jwt_payload(
         &mut self,
         mut user_claims: Value,
-        sd_strategy: SDJWTClaimsStrategy,
+        sd_strategy: ClaimsForSelectiveDisclosureStrategy,
     ) -> Result<()> {
         let claims_obj_ref = user_claims
             .as_object_mut()
@@ -213,7 +213,7 @@ impl SDJWTIssuer {
         Ok(())
     }
 
-    fn create_sd_claims(&mut self, user_claims: &Value, sd_strategy: SDJWTClaimsStrategy) -> Value {
+    fn create_sd_claims(&mut self, user_claims: &Value, sd_strategy: ClaimsForSelectiveDisclosureStrategy) -> Value {
         match user_claims {
             Value::Array(list) => self.create_sd_claims_list(list, sd_strategy),
             Value::Object(object) => self.create_sd_claims_object(object, sd_strategy),
@@ -221,7 +221,7 @@ impl SDJWTIssuer {
         }
     }
 
-    fn create_sd_claims_list(&mut self, list: &[Value], sd_strategy: SDJWTClaimsStrategy) -> Value {
+    fn create_sd_claims_list(&mut self, list: &[Value], sd_strategy: ClaimsForSelectiveDisclosureStrategy) -> Value {
         let mut claims = Vec::new();
         for (idx, object) in list.iter().enumerate() {
             let key = format!("[{idx}]");
@@ -242,7 +242,7 @@ impl SDJWTIssuer {
     fn create_sd_claims_object(
         &mut self,
         user_claims: &SJMap<String, Value>,
-        sd_strategy: SDJWTClaimsStrategy,
+        sd_strategy: ClaimsForSelectiveDisclosureStrategy,
     ) -> Value {
         let mut claims = SJMap::new();
         let mut sd_claims = Vec::new();
@@ -357,7 +357,7 @@ mod tests {
     use log::trace;
     use serde_json::json;
 
-    use crate::issuer::SDJWTClaimsStrategy;
+    use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::{SDJWTIssuer, SDJWTSerializationFormat};
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
@@ -380,7 +380,7 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims,
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
             SDJWTSerializationFormat::Compact,
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_next_level_array() {
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "name",
             "addresses[1]",
             "addresses[1].country",
@@ -399,12 +399,12 @@ mod tests {
         ]);
 
         let next_strategy = strategy.next_level("addresses").next_level("[1]");
-        assert_eq!(&next_strategy, &SDJWTClaimsStrategy::Partial(vec!["", "country"]));
+        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["", "country"]));
     }
 
     #[test]
     fn test_next_level_object() {
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "address.street_address",
             "address.locality",
             "address.region",
@@ -412,7 +412,7 @@ mod tests {
         ]);
 
         let next_strategy = strategy.next_level("address");
-        assert_eq!(&next_strategy, &SDJWTClaimsStrategy::Partial(vec![
+        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "street_address",
             "locality",
             "region",

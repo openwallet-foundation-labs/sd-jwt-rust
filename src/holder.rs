@@ -341,7 +341,7 @@ impl SDJWTHolder {
 
 #[cfg(test)]
 mod tests {
-    use crate::issuer::SDJWTClaimsStrategy;
+    use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::{SDJWTHolder, SDJWTIssuer, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, SDJWTSerializationFormat};
     use jsonwebtoken::EncodingKey;
     use serde_json::{json, Map, Value};
@@ -367,7 +367,7 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
             SDJWTSerializationFormat::Compact,
@@ -407,7 +407,7 @@ mod tests {
 
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
             SDJWTSerializationFormat::Compact,
@@ -464,7 +464,7 @@ mod tests {
               ]
             }
         );
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.name",
             "$.addresses[1]",
             "$.addresses[1].country",
