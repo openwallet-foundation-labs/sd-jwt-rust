@@ -37,6 +37,7 @@ pub struct SDJWTIssuer {
 }
 
 /// SDJWTClaimsStrategy is used to determine which claims can be selectively disclosed later by the holder.
+#[derive(PartialEq, Debug)]
 pub enum SDJWTClaimsStrategy<'a> {
     /// No claims can be selectively disclosed. Full disclosure.
     No,
@@ -385,5 +386,36 @@ mod tests {
         )
             .unwrap();
         trace!("{:?}", sd_jwt)
+    }
+
+    #[test]
+    fn test_next_level_array() {
+        let strategy = SDJWTClaimsStrategy::Partial(vec![
+            "name",
+            "addresses[1]",
+            "addresses[1].country",
+            "nationalities[0]",
+        ]);
+
+        let next_strategy = strategy.next_level("addresses").next_level("[1]");
+        assert_eq!(&next_strategy, &SDJWTClaimsStrategy::Partial(vec!["", "country"]));
+    }
+
+    #[test]
+    fn test_next_level_object() {
+        let strategy = SDJWTClaimsStrategy::Partial(vec![
+            "address.street_address",
+            "address.locality",
+            "address.region",
+            "address.country",
+        ]);
+
+        let next_strategy = strategy.next_level("address");
+        assert_eq!(&next_strategy, &SDJWTClaimsStrategy::Partial(vec![
+            "street_address",
+            "locality",
+            "region",
+            "country"
+        ]));
     }
 }
