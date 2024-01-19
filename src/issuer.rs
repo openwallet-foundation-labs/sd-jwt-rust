@@ -80,17 +80,7 @@ impl<'a> SDJWTClaimsStrategy<'a> {
                 let next_sd_keys = sd_keys
                     .iter()
                     .filter_map(|str| {
-                        str.strip_prefix(key).as_mut().map(|claim| {
-                            if let Some(next_claim) = claim.strip_prefix('.') {
-                                next_claim
-                            } else {
-                                // FIXME Replace to non-leackable impl
-                                // Removes "[", "]" symbols form "index" and returns "next_claim" as "index.remained_claims.."
-                                // For example: [0].street -> 0.street
-                                *claim = claim.replace(['[', ']'], "").leak();
-                                claim
-                            }
-                        })
+                        str.strip_prefix(key).and_then(|str| str.strip_prefix('.').or(Some(&str)))
                     })
                     .collect();
                 Self::Partial(next_sd_keys)
@@ -232,7 +222,7 @@ impl SDJWTIssuer {
     fn create_sd_claims_list(&mut self, list: &[Value], sd_strategy: SDJWTClaimsStrategy) -> Value {
         let mut claims = Vec::new();
         for (idx, object) in list.iter().enumerate() {
-            let key = idx.to_string();
+            let key = format!("[{idx}]");
             let strategy_for_child = sd_strategy.next_level(&key);
             let subtree = self.create_sd_claims(object, strategy_for_child);
 
