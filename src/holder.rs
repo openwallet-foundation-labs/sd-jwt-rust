@@ -41,7 +41,7 @@ impl SDJWTHolder {
     pub fn new(sd_jwt_with_disclosures: String, serialization_format: SDJWTSerializationFormat) -> Result<Self> {
         let mut holder = SDJWTHolder {
             sd_jwt_engine: SDJWTCommon {
-                serialization_format: serialization_format,
+                serialization_format,
                 ..Default::default()
             },
             hs_disclosures: Vec::new(),

@@ -82,7 +82,13 @@ impl<'a> ClaimsForSelectiveDisclosureStrategy<'a> {
                 let next_sd_keys = sd_keys
                     .iter()
                     .filter_map(|str| {
-                        str.strip_prefix(key).and_then(|str| str.strip_prefix('.').or(Some(&str)))
+                        str.strip_prefix(key).and_then(|str|
+                            match str.chars().next() {
+                                Some('.') => Some(&str[1..]), // next token
+                                Some('[') => Some(str),       // array index
+                                _ => None,
+                            }
+                        )
                     })
                     .collect();
                 Self::Custom(next_sd_keys)
@@ -398,8 +404,10 @@ mod tests {
             "nationalities[0]",
         ]);
 
-        let next_strategy = strategy.next_level("addresses").next_level("[1]");
-        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["", "country"]));
+        let next_strategy = strategy.next_level("addresses");
+        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["[1]", "[1].country"]));
+        let next_strategy = next_strategy.next_level("[1]");
+        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["country"]));
     }
 
     #[test]
