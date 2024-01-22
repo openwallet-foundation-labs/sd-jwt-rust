@@ -1,4 +1,4 @@
-use crate::{error, SDJWTJson};
+use crate::{error, SDJWTJson, SDJWTSerializationFormat};
 use error::{Error, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Map, Value};
@@ -29,7 +29,7 @@ impl SDJWTHolder {
     ///
     /// # Arguments
     /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`
-    /// * `serialization_format` - Serialization format of the SD JWT. Supported values are `compact` and `json`
+    /// * `serialization_format` - Serialization format of the SD JWT, see [SDJWTSerializationFormat].
     ///
     /// # Returns
     /// * `SDJWTHolder` - Instance of SDJWTHolder
@@ -38,18 +38,10 @@ impl SDJWTHolder {
     /// * `InvalidInput` - If the serialization format is not supported
     /// * `InvalidState` - If the SD JWT data is not valid
     /// * `DeserializationError` - If the SD JWT serialization is not valid
-    pub fn new(sd_jwt_with_disclosures: String, serialization_format: String) -> Result<Self> {
-        let serialization_format = serialization_format.to_lowercase();
-        if serialization_format != "compact" && serialization_format != "json" {
-            return Err(Error::InvalidInput(format!(
-                "Serialization format \"{}\" is not supported",
-                serialization_format
-            )));
-        }
-
+    pub fn new(sd_jwt_with_disclosures: String, serialization_format: SDJWTSerializationFormat) -> Result<Self> {
         let mut holder = SDJWTHolder {
             sd_jwt_engine: SDJWTCommon {
-                serialization_format: serialization_format.clone(),
+                serialization_format,
                 ..Default::default()
             },
             hs_disclosures: Vec::new(),
@@ -119,7 +111,7 @@ impl SDJWTHolder {
             }
         }
 
-        let sd_jwt_presentation = if self.sd_jwt_engine.serialization_format == "compact" {
+        let sd_jwt_presentation = if self.sd_jwt_engine.serialization_format == SDJWTSerializationFormat::Compact {
             let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 2);
             combined.push(&self.serialized_sd_jwt);
             combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
@@ -349,8 +341,8 @@ impl SDJWTHolder {
 
 #[cfg(test)]
 mod tests {
-    use crate::issuer::SDJWTClaimsStrategy;
-    use crate::{SDJWTHolder, SDJWTIssuer, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
+    use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
+    use crate::{SDJWTHolder, SDJWTIssuer, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, SDJWTSerializationFormat};
     use jsonwebtoken::EncodingKey;
     use serde_json::{json, Map, Value};
     use std::collections::HashSet;
@@ -375,15 +367,15 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
-            "compact".to_ascii_lowercase(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap()
             .create_presentation(
@@ -415,16 +407,16 @@ mod tests {
 
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
         let issued = sd_jwt.clone();
         user_claims["address"] = Value::Object(Map::new());
         let presentation =
-            SDJWTHolder::new(sd_jwt, "compact".to_ascii_lowercase())
+            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),
@@ -472,7 +464,7 @@ mod tests {
               ]
             }
         );
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.name",
             "$.addresses[1]",
             "$.addresses[1].country",
@@ -486,7 +478,7 @@ mod tests {
             strategy,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
         // Choose what to reveal
@@ -496,7 +488,7 @@ mod tests {
         let issued = sd_jwt.clone();
         println!("{}", issued);
         let presentation =
-            SDJWTHolder::new(sd_jwt, "compact".to_ascii_lowercase())
+            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),

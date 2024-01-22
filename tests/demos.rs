@@ -7,8 +7,8 @@ use crate::utils::fixtures::{
 use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
-use sd_jwt_rs::issuer::SDJWTClaimsStrategy;
-use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier};
+use sd_jwt_rs::issuer::ClaimsForSelectiveDisclosureStrategy;
+use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
 use sd_jwt_rs::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -40,7 +40,7 @@ fn _address_claims() -> serde_json::Value {
 #[fixture]
 fn address_flat<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -48,7 +48,7 @@ fn address_flat<'a>() -> (
     let number_of_revealed_sds = 1;
     (
         value.clone(),
-        SDJWTClaimsStrategy::Flat,
+        ClaimsForSelectiveDisclosureStrategy::TopLevel,
         value.as_object().unwrap().clone(),
         number_of_revealed_sds,
     )
@@ -57,7 +57,7 @@ fn address_flat<'a>() -> (
 #[fixture]
 fn address_full_recursive<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -66,7 +66,7 @@ fn address_full_recursive<'a>() -> (
     let number_of_revealed_sds = 5;
     (
         value,
-        SDJWTClaimsStrategy::Full,
+        ClaimsForSelectiveDisclosureStrategy::AllLevels,
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -75,7 +75,7 @@ fn address_full_recursive<'a>() -> (
 #[fixture]
 fn address_only_structured<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -92,7 +92,7 @@ fn address_only_structured<'a>() -> (
 
     (
         value.clone(),
-        SDJWTClaimsStrategy::Partial(ADDRESS_ONLY_STRUCTURED_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(ADDRESS_ONLY_STRUCTURED_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -101,7 +101,7 @@ fn address_only_structured<'a>() -> (
 #[fixture]
 fn address_only_structured_one_open<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -117,7 +117,7 @@ fn address_only_structured_one_open<'a>() -> (
 
     (
         value,
-        SDJWTClaimsStrategy::Partial(ADDRESS_ONLY_STRUCTURED_ONE_OPEN_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(ADDRESS_ONLY_STRUCTURED_ONE_OPEN_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -126,7 +126,7 @@ fn address_only_structured_one_open<'a>() -> (
 #[fixture]
 fn arrayed_claims<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -140,7 +140,7 @@ fn arrayed_claims<'a>() -> (
 
     (
         value,
-        SDJWTClaimsStrategy::Partial(ARRAYED_CLAIMS_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(ARRAYED_CLAIMS_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -149,7 +149,7 @@ fn arrayed_claims<'a>() -> (
 #[fixture]
 fn nested_array<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -162,7 +162,7 @@ fn nested_array<'a>() -> (
 
     (
         value.clone(),
-        SDJWTClaimsStrategy::Partial(NESTED_ARRAY_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(NESTED_ARRAY_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -171,7 +171,7 @@ fn nested_array<'a>() -> (
 #[fixture]
 fn complex_eidas<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -209,7 +209,7 @@ fn complex_eidas<'a>() -> (
 
     (
         value.clone(),
-        SDJWTClaimsStrategy::Partial(COMPLEX_EIDAS_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(COMPLEX_EIDAS_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -218,7 +218,7 @@ fn complex_eidas<'a>() -> (
 #[fixture]
 fn w3c_vc<'a>() -> (
     serde_json::Value,
-    SDJWTClaimsStrategy<'a>,
+    ClaimsForSelectiveDisclosureStrategy<'a>,
     Map<String, Value>,
     usize,
 ) {
@@ -243,7 +243,7 @@ fn w3c_vc<'a>() -> (
 
     (
         value.clone(),
-        SDJWTClaimsStrategy::Partial(W3C_VC_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(W3C_VC_JSONPATH.to_vec()),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -277,7 +277,7 @@ fn demo_positive_cases(
     issuer_key: EncodingKey,
     #[case] data: (
         serde_json::Value,
-        SDJWTClaimsStrategy,
+        ClaimsForSelectiveDisclosureStrategy,
         Map<String, Value>,
         usize,
     ),
@@ -287,7 +287,7 @@ fn demo_positive_cases(
         Option<EncodingKey>,
         Option<Jwk>,
     ),
-    #[values("compact".to_string(), "json".to_string())] format: String,
+    #[values(SDJWTSerializationFormat::Compact, SDJWTSerializationFormat::JSON)] format: SDJWTSerializationFormat,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
@@ -315,7 +315,7 @@ fn demo_positive_cases(
         )
         .unwrap();
 
-    if format == "compact" {
+    if format == SDJWTSerializationFormat::Compact {
         let mut issued_parts: HashSet<&str> = issued
             .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             .collect();

@@ -12,7 +12,7 @@ Proposals about API improvements are highly appreciated.
 ```rust
 fn demo() {
     let mut issuer = SDJWTIssuer::new(issuer_key, None);
-    let sd_jwt = issuer.issue_sd_jwt(claims, SDJWTClaimsStrategy::Full, holder_key, add_decoy, "compact".to_owned()).unwrap();
+    let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_key, add_decoy, "compact".to_owned()).unwrap();
 
     let mut holder = SDJWTHolder::new(sd_jwt, "compact".to_owned()).unwrap();
     let presentation = holder.create_presentation(claims_to_disclosure, None, None, None, None).unwrap();

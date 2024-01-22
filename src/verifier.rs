@@ -1,3 +1,4 @@
+use crate::SDJWTSerializationFormat;
 use crate::error::Error;
 use crate::error::Result;
 use jsonwebtoken::jwk::Jwk;
@@ -36,7 +37,7 @@ impl SDJWTVerifier {
     /// * `cb_get_issuer_key` - A callback function that takes the issuer and the header of the SD-JWT and returns the public key of the issuer.
     /// * `expected_aud` - The expected audience of the SD-JWT.
     /// * `expected_nonce` - The expected nonce of the SD-JWT.
-    /// * `serialization_format` - The serialization format of the SD-JWT.
+    /// * `serialization_format` - The serialization format of the SD-JWT, see [SDJWTSerializationFormat].
     ///
     /// # Returns
     /// * `SDJWTVerifier` - The SDJWTVerifier instance. The verified claims can be accessed via the `verified_claims` property.
@@ -45,7 +46,7 @@ impl SDJWTVerifier {
         cb_get_issuer_key: Box<KeyResolver>,
         expected_aud: Option<String>,
         expected_nonce: Option<String>,
-        serialization_format: String,
+        serialization_format: SDJWTSerializationFormat,
     ) -> Result<Self> {
         let mut verifier = SDJWTVerifier {
             sd_jwt_payload: serde_json::Map::new(),
@@ -180,7 +181,7 @@ impl SDJWTVerifier {
         if key_binding_jwt.claims.get("nonce") != Some(&Value::String(expected_nonce)) {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
-        if self.sd_jwt_engine.serialization_format == "compact" {
+        if self.sd_jwt_engine.serialization_format == SDJWTSerializationFormat::Compact {
             let sd_hash = self._get_key_binding_digest_hash()?;
             if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
                 return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
@@ -308,8 +309,8 @@ impl SDJWTVerifier {
 
 #[cfg(test)]
 mod tests {
-    use crate::issuer::SDJWTClaimsStrategy;
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier};
+    use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
+    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier, SDJWTSerializationFormat};
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use serde_json::{json, Value};
 
@@ -334,13 +335,13 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::Full,
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
-        let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned())
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::Compact)
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
@@ -359,7 +360,7 @@ mod tests {
             }),
             None,
             None,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap()
             .verified_claims;
@@ -384,14 +385,14 @@ mod tests {
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
             user_claims.clone(),
-            SDJWTClaimsStrategy::No,
+            ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
 
-        let presentation = SDJWTHolder::new(sd_jwt.clone(), "compact".to_owned())
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::Compact)
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
@@ -410,7 +411,7 @@ mod tests {
             }),
             None,
             None,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap()
             .verified_claims;
@@ -448,7 +449,7 @@ mod tests {
         );
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let strategy = SDJWTClaimsStrategy::Partial(vec![
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.name",
             "$.addresses[1]",
             "$.addresses[1].country",
@@ -459,7 +460,7 @@ mod tests {
             strategy,
             None,
             false,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap();
 
@@ -467,7 +468,7 @@ mod tests {
         claims_to_disclose["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
         claims_to_disclose["nationalities"] =
             Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
-        let presentation = SDJWTHolder::new(sd_jwt, "compact".to_owned())
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
             .create_presentation(
                 claims_to_disclose.as_object().unwrap().clone(),
@@ -486,7 +487,7 @@ mod tests {
             }),
             None,
             None,
-            "compact".to_owned(),
+            SDJWTSerializationFormat::Compact,
         )
             .unwrap()
             .verified_claims;
