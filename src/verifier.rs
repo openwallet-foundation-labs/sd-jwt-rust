@@ -37,7 +37,7 @@ impl SDJWTVerifier {
     /// * `cb_get_issuer_key` - A callback function that takes the issuer and the header of the SD-JWT and returns the public key of the issuer.
     /// * `expected_aud` - The expected audience of the SD-JWT.
     /// * `expected_nonce` - The expected nonce of the SD-JWT.
-    /// * `serialization_format` - The serialization format of the SD-JWT.
+    /// * `serialization_format` - The serialization format of the SD-JWT, see [SDJWTSerializationFormat].
     ///
     /// # Returns
     /// * `SDJWTVerifier` - The SDJWTVerifier instance. The verified claims can be accessed via the `verified_claims` property.

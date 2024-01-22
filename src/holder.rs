@@ -29,7 +29,7 @@ impl SDJWTHolder {
     ///
     /// # Arguments
     /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`
-    /// * `serialization_format` - Serialization format of the SD JWT.
+    /// * `serialization_format` - Serialization format of the SD JWT, see [SDJWTSerializationFormat].
     ///
     /// # Returns
     /// * `SDJWTHolder` - Instance of SDJWTHolder
