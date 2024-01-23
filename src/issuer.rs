@@ -32,9 +32,9 @@ pub struct SDJWTIssuer {
     // internal fields
     inner: SDJWTCommon,
     all_disclosures: Vec<SDJWTDisclosure>,
-    pub sd_jwt_payload: SJMap<String, Value>,
-    pub signed_sd_jwt: String,
-    pub serialized_sd_jwt: String,
+    sd_jwt_payload: SJMap<String, Value>,
+    signed_sd_jwt: String,
+    serialized_sd_jwt: String,
 }
 
 /// ClaimsForSelectiveDisclosureStrategy is used to determine which claims can be selectively disclosed later by the holder.
@@ -196,7 +196,7 @@ impl SDJWTIssuer {
         let always_revealed_root_keys = vec!["iss", "iat", "exp"];
         let mut always_revealed_claims: Map<String, Value> = always_revealed_root_keys
             .into_iter()
-            .filter_map(|key| claims_obj_ref.remove_entry(key))
+            .filter_map(|key| claims_obj_ref.shift_remove_entry(key))
             .collect();
 
         self.sd_jwt_payload = self
@@ -252,6 +252,10 @@ impl SDJWTIssuer {
         sd_strategy: ClaimsForSelectiveDisclosureStrategy,
     ) -> Value {
         let mut claims = SJMap::new();
+
+        // to have the first key "_sd" in the ordered map
+        claims.insert(SD_DIGESTS_KEY.to_owned(), Value::Null);
+
         let mut sd_claims = Vec::new();
 
         for (key, value) in user_claims.iter() {
@@ -281,6 +285,8 @@ impl SDJWTIssuer {
                 SD_DIGESTS_KEY.to_owned(),
                 Value::Array(sd_claims.into_iter().map(Value::String).collect()),
             );
+        } else {
+            claims.shift_remove(SD_DIGESTS_KEY);
         }
 
         Value::Object(claims)
@@ -353,7 +359,7 @@ impl SDJWTIssuer {
     }
 
     fn create_decoy_claim_entry(&mut self) -> String {
-        let digest = base64_hash(generate_salt(None).as_bytes()).to_string();
+        let digest = base64_hash(generate_salt().as_bytes()).to_string();
         digest
     }
 }

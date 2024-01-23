@@ -40,7 +40,7 @@ cargo test
 ```
 
 ### Interoperability testing tool
-Coming soon (planned for v0.0.7)
+See [Generate tool README](./generate/README.md) document.
 
 ## External Dependencies
 
