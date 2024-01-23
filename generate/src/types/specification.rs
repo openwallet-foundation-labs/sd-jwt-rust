@@ -1,7 +1,6 @@
 use crate::utils::generate::generate_jsonpath_from_tagged_values;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::error::Result;
 
@@ -10,14 +9,61 @@ const SD_TAG: &str = "!sd";
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
 pub struct Specification {
     pub user_claims: UserClaims,
-    pub holder_disclosed_claims: HashMap<Value, Value>,
+    pub holder_disclosed_claims: serde_json::Map<String, serde_json::Value>,
     pub add_decoy_claims: Option<bool>,
     pub key_binding: Option<bool>,
+    pub serialization_format: Option<String>,
+}
+
+impl Specification {
+    fn update_disclosed_claims(&mut self) {
+        // not to transform top-level empty object
+        if self.holder_disclosed_claims.is_empty() {
+            return;
+        }
+
+        let res = replace_empty_items(&serde_json::Value::Object(self.holder_disclosed_claims.clone()));
+        self.holder_disclosed_claims = res.as_object().unwrap().clone();
+    }
+}
+
+fn replace_empty_items(m: &serde_json::Value) -> serde_json::Value {
+    match m {
+        serde_json::Value::Array(arr) if (arr.is_empty()) => {
+            serde_json::Value::Bool(false)
+        }
+        serde_json::Value::Object(obj) if (obj.is_empty()) => {
+            serde_json::Value::Bool(false)
+        }
+        serde_json::Value::Array(arr) => {
+            let mut result = Vec::new();
+
+            for value in arr {
+                result.push(replace_empty_items(value));
+            }
+
+            serde_json::Value::Array(result)
+        }
+        serde_json::Value::Object(obj) => {
+            let mut result = serde_json::Map::new();
+
+            for (key, value) in obj {
+                result.insert(key.clone(), replace_empty_items(value));
+            }
+
+            serde_json::Value::Object(result)
+        }
+        _ => {
+            m.clone()
+        }
+    }
 }
 
 impl From<&str> for Specification {
     fn from(value: &str) -> Self {
-        serde_yaml::from_str(value).unwrap_or(Specification::default())
+        let mut result = serde_yaml::from_str(value).unwrap_or(Specification::default());
+        result.update_disclosed_claims();
+        result
     }
 }
 
@@ -25,20 +71,20 @@ impl From<&PathBuf> for Specification {
     fn from(path: &PathBuf) -> Self {
         let contents = std::fs::read_to_string(path).expect("Failed to read specification file");
 
-        let spec: Specification = serde_yaml::from_str(&contents).expect("Failed to parse YAML");
+        let mut spec: Specification = serde_yaml::from_str(&contents).expect("Failed to parse YAML");
+
+        spec.update_disclosed_claims();
 
         spec
     }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Default)]
-pub struct UserClaims(HashMap<Value, Value>);
+pub struct UserClaims(Value);
 
 impl UserClaims {
     pub fn claims_to_json_value(&self) -> Result<serde_json::Value> {
-        let value = serde_yaml::to_value(&self.0)
-            .expect("Failed to convert user-claims into serde_yaml::Value");
-        let filtered_value = _remove_tags(&value);
+        let filtered_value = _remove_tags(&self.0);
         let json_value: serde_json::Value =
             serde_yaml::from_value(filtered_value).expect("Failed to convert serde_json::Value");
 
@@ -46,11 +92,11 @@ impl UserClaims {
     }
 
     pub fn sd_claims_to_jsonpath(&self) -> Result<Vec<String>> {
-        let mut path = "".to_string();
+        let path = "".to_string();
         let mut paths = Vec::new();
-        let mut claims = serde_yaml::to_value(&self.0)?;
+        let mut claims = self.0.clone();
 
-        let _ = generate_jsonpath_from_tagged_values(&mut claims, &mut path, &mut paths);
+        let _ = generate_jsonpath_from_tagged_values(&mut claims, path, &mut paths);
 
         Ok(paths)
     }
@@ -60,7 +106,7 @@ fn _validate(value: &Value) -> Result<()> {
     match value {
         Value::String(_) | Value::Bool(_) | Value::Number(_) => Ok(()),
         Value::Tagged(tag) => {
-            if tag.tag.to_string() == SD_TAG {
+            if tag.tag == SD_TAG {
                 _validate(&tag.value)
             } else {
                 panic!(
@@ -115,7 +161,7 @@ fn _remove_tags(original: &Value) -> Value {
             Value::Mapping(filtered_map)
         }
         Value::Sequence(seq) => {
-            let filtered_seq: Vec<Value> = seq.iter().map(|v| _remove_tags(v)).collect();
+            let filtered_seq: Vec<Value> = seq.iter().map(_remove_tags).collect();
 
             Value::Sequence(filtered_seq)
         }

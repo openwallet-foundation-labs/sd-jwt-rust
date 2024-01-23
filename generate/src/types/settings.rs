@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct KeySettings {
     pub key_size: i32,
     pub kty: String,
     pub issuer_key: Key,
-    pub holder_key: Key,
+    pub holder_key: Value,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]

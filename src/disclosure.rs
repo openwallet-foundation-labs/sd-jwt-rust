@@ -1,4 +1,10 @@
-use crate::utils::{base64_hash, base64url_encode, generate_salt};
+use crate::utils::{base64_hash, base64url_encode};
+#[cfg(not(feature = "mock_salts"))]
+use crate::utils::generate_salt;
+#[cfg(feature = "mock_salts")]
+use crate::utils::generate_salt_mock;
+use serde_json::Value;
+
 
 #[derive(Debug)]
 pub(crate) struct SDJWTDisclosure {
@@ -8,19 +14,31 @@ pub(crate) struct SDJWTDisclosure {
 
 impl SDJWTDisclosure  {
     pub(crate) fn new<V>(key: Option<String>, value: V) -> Self where V: ToString {
-        let salt = generate_salt(key.clone());
+        #[cfg(not(feature = "mock_salts"))]
+        let salt = generate_salt();
         let mut value_str = value.to_string();
-        value_str = value_str.replace(":[", ": [").replace(',', ", ");
-        let (_data, raw_b64) = if let Some(key) = &key { //TODO remove data?
-            let data = format!(r#"["{}", "{}", {}]"#, salt, key, value_str);
-            let raw_b64 = base64url_encode(data.as_bytes());
-            (data, raw_b64)
-        } else {
-            let data = format!(r#"["{}", {}]"#, salt, value_str);
-            let raw_b64 = base64url_encode(data.as_bytes());
-            (data, raw_b64)
+
+        #[cfg(feature = "mock_salts")]
+        let salt = {
+            value_str = value_str
+                .replace(":[", ": [")
+                .replace(',', ", ")
+                .replace("\":", "\": ")
+                .replace("\":  ", "\": ");
+            generate_salt_mock()
         };
 
+        if !value_str.is_ascii() {
+            value_str = escape_unicode_chars(&value_str);
+        }
+
+        let data = if let Some(key) = &key {
+            format!(r#"["{}", {}, {}]"#, salt, escape_json(key), value_str)
+        } else {
+            format!(r#"["{}", {}]"#, salt, value_str)
+        };
+
+        let raw_b64 = base64url_encode(data.as_bytes());
         let hash = base64_hash(raw_b64.as_bytes());
 
         Self {
@@ -28,6 +46,33 @@ impl SDJWTDisclosure  {
             hash,
         }
     }
+}
+
+fn escape_unicode_chars(s: &str) -> String {
+    let mut result = String::new();
+
+    for c in s.chars() {
+        if c.is_ascii() {
+            result.push(c);
+        } else {
+            let esc_c = c.escape_unicode().to_string();
+
+            let esc_c_new = match esc_c.chars().count() {
+                6 => esc_c.replace("\\u{", "\\u00").replace('}', ""), // example: \u{de}
+                7 => esc_c.replace("\\u{", "\\u0").replace('}', ""),  // example: \u{980}
+                8 => esc_c.replace("\\u{", "\\u").replace('}', ""),   // example: \u{23f0}
+                _ => {panic!("unexpected value")}
+            };
+
+            result.push_str(&esc_c_new);
+        }
+    }
+
+    result
+}
+
+fn escape_json(s: &str) -> String {
+    Value::String(String::from(s)).to_string()
 }
 
 #[cfg(test)]

@@ -231,15 +231,15 @@ impl SDJWTVerifier {
     fn unpack_disclosed_claims(&mut self, sd_jwt_claims: &Value) -> Result<Value> {
         match sd_jwt_claims {
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-                return Ok(sd_jwt_claims.to_owned());
+                Ok(sd_jwt_claims.to_owned())
             }
             Value::Array(arr) => {
-                return self.unpack_disclosed_claims_in_array(arr);
+                self.unpack_disclosed_claims_in_array(arr)
             }
             Value::Object(obj) => {
-                return self.unpack_disclosed_claims_in_object(obj);
+                self.unpack_disclosed_claims_in_object(obj)
             }
-        };
+        }
     }
 
     fn unpack_disclosed_claims_in_array(&mut self, arr: &Vec<Value>) -> Result<Value> {
@@ -263,8 +263,8 @@ impl SDJWTVerifier {
 
                     let digest = obj.get(SD_LIST_PREFIX).unwrap();
                     let disclosed_claim = self.unpack_from_digest(digest)?;
-                    if disclosed_claim.is_some() {
-                        claims.push(disclosed_claim.unwrap());
+                    if let Some(disclosed_claim) = disclosed_claim {
+                        claims.push(disclosed_claim);
                     }
                 },
                 _ => {
@@ -273,7 +273,7 @@ impl SDJWTVerifier {
                 },
             }
         }
-        return Ok(Value::Array(claims));
+        Ok(Value::Array(claims))
     }
 
     fn unpack_disclosed_claims_in_object(&mut self, nested_sd_jwt_claims: &Map<String, Value>) -> Result<Value> {
