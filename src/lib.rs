@@ -202,5 +202,28 @@ impl SDJWTCommon {
 
 #[cfg(test)]
 mod tests {
-    //FIXME add tests
+    use crate::{utils, SDJWTCommon};
+
+
+    #[test]
+    fn test_parse_compact_sd_jwt(){
+        let mut sdjwt = SDJWTCommon::default();
+        let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
+        sdjwt.parse_compact_sd_jwt(format!("jwt1.{encoded_empty_object}.jwt3~disc1~disc2~kbjwt")).unwrap();
+        assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
+        assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
+        assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_json_sd_jwt() {
+        let mut sdjwt = SDJWTCommon::default();
+        let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
+        sdjwt.parse_json_sd_jwt(format!(
+            "{{\"protected\":\"jwt1\",\"payload\":\"{encoded_empty_object}\",\"signature\":\"jwt3\",\"disclosures\":[\"disc1\",\"disc2\"],\"kb_jwt\":\"kbjwt\"}}"
+        )).unwrap();
+        assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
+        assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
+        assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
+    }
 }
