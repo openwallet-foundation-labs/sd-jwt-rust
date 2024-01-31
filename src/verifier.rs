@@ -14,6 +14,7 @@ use crate::utils::base64_hash;
 use crate::{
     SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
     DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY,
+    SD_LIST_PREFIX,
 };
 
 type KeyResolver = dyn Fn(&str, &Header) -> DecodingKey;
@@ -228,27 +229,54 @@ impl SDJWTVerifier {
     }
 
     fn unpack_disclosed_claims(&mut self, sd_jwt_claims: &Value) -> Result<Value> {
-        let nested_sd_jwt_claims = match sd_jwt_claims {
+        match sd_jwt_claims {
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 return Ok(sd_jwt_claims.to_owned());
             }
             Value::Array(arr) => {
-                if arr.is_empty() {
-                    return Err(Error::InvalidArrayDisclosureObject(
-                        "Array of disclosed claims cannot be empty".to_string(),
-                    ));
-                }
+                return self.unpack_disclosed_claims_in_array(arr);
+            }
+            Value::Object(obj) => {
+                return self.unpack_disclosed_claims_in_object(obj);
+            }
+        };
+    }
 
-                let mut claims = vec![];
-                for value in arr {
+    fn unpack_disclosed_claims_in_array(&mut self, arr: &Vec<Value>) -> Result<Value> {
+        if arr.is_empty() {
+            return Err(Error::InvalidArrayDisclosureObject(
+                "Array of disclosed claims cannot be empty".to_string(),
+            ));
+        }
+
+        let mut claims = vec![];
+        for value in arr {
+
+            match value {
+                // case for SD objects in arrays
+                Value::Object(obj) if obj.contains_key(SD_LIST_PREFIX) => {
+                    if obj.len() > 1 {
+                        return Err(Error::InvalidDisclosure(
+                            "Disclosed claim object in an array maust contain only one key".to_string(),
+                        ));
+                    }
+
+                    let digest = obj.get(SD_LIST_PREFIX).unwrap();
+                    let disclosed_claim = self.unpack_from_digest(digest)?;
+                    if disclosed_claim.is_some() {
+                        claims.push(disclosed_claim.unwrap());
+                    }
+                },
+                _ => {
                     let claim = self.unpack_disclosed_claims(value)?;
                     claims.push(claim);
-                }
-                return Ok(Value::Array(claims));
+                },
             }
-            Value::Object(obj) => obj,
-        };
+        }
+        return Ok(Value::Array(claims));
+    }
 
+    fn unpack_disclosed_claims_in_object(&mut self, nested_sd_jwt_claims: &Map<String, Value>) -> Result<Value> {
         let mut disclosed_claims: Map<String, Value> = serde_json::Map::new();
 
         for (key, value) in nested_sd_jwt_claims {
@@ -304,6 +332,38 @@ impl SDJWTVerifier {
         }
 
         Ok(())
+    }
+
+    fn unpack_from_digest(
+        &mut self,
+        digest: &Value,
+    ) -> Result<Option<Value>> {
+        let digest = digest
+            .as_str()
+            .ok_or(Error::ConversionError("str".to_string()))?;
+        if self.duplicate_hash_check.contains(&digest.to_string()) {
+            return Err(Error::DuplicateDigestError(digest.to_string()));
+        }
+        self.duplicate_hash_check.push(digest.to_string());
+
+        if let Some(value_for_digest) =
+            self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest)
+        {
+            let disclosure =
+                value_for_digest
+                    .as_array()
+                    .ok_or(Error::InvalidArrayDisclosureObject(
+                        value_for_digest.to_string(),
+                    ))?;
+
+            let value = disclosure[1].clone();
+            let unpacked_value = self.unpack_disclosed_claims(&value)?;
+            return Ok(Some(unpacked_value));
+        } else {
+            debug!("Digest {:?} skipped as decoy", digest)
+        }
+
+        Ok(None)
     }
 }
 
@@ -492,15 +552,114 @@ mod tests {
             .unwrap()
             .verified_claims;
 
-        assert_eq!(
-            verified_claims["addresses"][0].to_owned(),
-            user_claims["addresses"][0].to_owned()
+        let expected_verified_claims = json!(
+            {
+                "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+                "addresses": [
+                    {
+                        "street_address": "Schulstr. 12",
+                        "locality": "Schulpforta",
+                        "region": "Sachsen-Anhalt",
+                        "country": "DE",
+                    },
+                    {
+                        "street_address": "456 Main St",
+                        "locality": "Anytown",
+                        "region": "NY",
+                    },
+                ],
+                "nationalities": [
+                    "US",
+                    "CA",
+                ],
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "exp": 1883000000,
+                "name": "Bois"
+            }
         );
-        assert!(!verified_claims["addresses"][1]
-            .to_owned()
-            .get("...")
+
+        assert_eq!(verified_claims, expected_verified_claims);
+    }
+
+    #[test]
+    fn verify_arrayed_no_sd_presentation() {
+        let user_claims = json!(
+            {
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "exp": 1883000000,
+                "array_with_recursive_sd": [
+                    "boring",
+                    {
+                        "foo": "bar",
+                        "baz": {
+                            "qux": "quux"
+                        }
+                    },
+                    ["foo", "bar"]
+                ],
+                "test2": ["foo", "bar"]
+            }
+        );
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
+            "$.array_with_recursive_sd[1]",
+            "$.array_with_recursive_sd[1].baz",
+            "$.array_with_recursive_sd[2][0]",
+            "$.array_with_recursive_sd[2][1]",
+            "$.test2[0]",
+            "$.test2[1]",
+        ]);
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
+            user_claims.clone(),
+            strategy,
+            None,
+            false,
+            SDJWTSerializationFormat::Compact,
+        )
+            .unwrap();
+
+        let claims_to_disclose = json!({});
+
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
-            .to_string()
-            .is_empty());
+            .create_presentation(
+                claims_to_disclose.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let verified_claims = SDJWTVerifier::new(
+            presentation.clone(),
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        )
+            .unwrap()
+            .verified_claims;
+
+        let expected_verified_claims = json!(
+            {
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "exp": 1883000000,
+                "array_with_recursive_sd":  [
+                    "boring",
+                    [],
+                ],
+                "test2": [],
+            }
+        );
+
+        assert_eq!(verified_claims, expected_verified_claims);
     }
 }
