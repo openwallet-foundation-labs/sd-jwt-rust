@@ -158,7 +158,11 @@ fn nested_array<'a>() -> (
     claims_to_disclose["nationalities"] = json!([[false, true]]);
 
     let claims_to_disclose = claims_to_disclose.as_object().unwrap().clone();
-    let number_of_revealed_sds = 1;
+
+    // since the claim are nested the holder must reveal
+    // all parents of the desired claim.
+    // 2 is 1 (desired claim) + 1 (parent SD item of desired claim)
+    let number_of_revealed_sds = 2;
 
     (
         value.clone(),
