@@ -193,7 +193,7 @@ impl SDJWTIssuer {
         let claims_obj_ref = user_claims
             .as_object_mut()
             .ok_or(Error::ConversionError("json object".to_string()))?;
-        let always_revealed_root_keys = vec!["sub", "iss", "iat", "exp"];
+        let always_revealed_root_keys = vec!["iss", "iat", "exp"];
         let mut always_revealed_claims: Map<String, Value> = always_revealed_root_keys
             .into_iter()
             .filter_map(|key| claims_obj_ref.remove_entry(key))

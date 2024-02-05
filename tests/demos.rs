@@ -45,7 +45,7 @@ fn address_flat<'a>() -> (
     usize,
 ) {
     let value = _address_claims();
-    let number_of_revealed_sds = 1;
+    let number_of_revealed_sds = 2; // 2 == 1('sub') + 1('address')
     (
         value.clone(),
         ClaimsForSelectiveDisclosureStrategy::TopLevel,
@@ -63,7 +63,15 @@ fn address_full_recursive<'a>() -> (
 ) {
     let value = _address_claims();
     let claims_to_disclose = value.as_object().unwrap().clone();
-    let number_of_revealed_sds = 5;
+
+    // revealed sds are:
+    //    sub
+    //    address
+    //    address.street_address
+    //    address.locality
+    //    address.region
+    //    address.country
+    let number_of_revealed_sds = 6;
     (
         value,
         ClaimsForSelectiveDisclosureStrategy::AllLevels,
