@@ -54,6 +54,7 @@ pub(crate) struct SDJWTCommon {
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
     input_disclosures: Vec<String>,
+    sign_alg: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
@@ -141,6 +142,7 @@ impl SDJWTCommon {
             length: parts.len(),
             msg: format!("Invalid SD-JWT: {}", sd_jwt_with_disclosures),
         })?;
+        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);
         self.unverified_input_key_binding_jwt = Some(
             parts
                 .next_back()
@@ -179,12 +181,14 @@ impl SDJWTCommon {
         self.input_disclosures = parsed_sd_jwt_json.disclosures;
         self.unverified_input_sd_jwt_payload =
             Some(jwt_payload_decode(&parsed_sd_jwt_json.payload)?);
-        self.unverified_sd_jwt = Some(format!(
+        let sd_jwt = format!(
             "{}.{}.{}",
             parsed_sd_jwt_json.protected,
             parsed_sd_jwt_json.payload,
             parsed_sd_jwt_json.signature
-        ));
+        );    
+        self.unverified_sd_jwt = Some(sd_jwt.clone());
+        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);    
         Ok(())
     }
 
@@ -197,6 +201,25 @@ impl SDJWTCommon {
                 self.parse_json_sd_jwt(sd_jwt_with_disclosures)
             }
         }
+    }
+    /// Decodes a header jwt string and extracts the "alg" field from the JSON object.
+    /// # Arguments
+    /// * `sd_jwt` - jwt format string.
+    /// # Returns
+    /// * `Option<String>` - The result containing the algorithm String e.g ES256 or on failure None.
+    fn decode_header_and_get_sign_algorithm(sd_jwt: &str) -> Option<String> {
+        let parts: Vec<&str> = sd_jwt.split('.').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let jwt_header = parts[0];
+        let decoded = base64url_decode(jwt_header).ok()?;
+        let decoded_str = std::str::from_utf8(&decoded).ok()?;
+        let json_sign_alg: Value = serde_json::from_str(decoded_str).ok()?;
+        let sign_alg = json_sign_alg.get("alg")
+            .and_then(Value::as_str)
+            .map(String::from);
+        sign_alg
     }
 }
 
