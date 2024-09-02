@@ -5,6 +5,7 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use log::debug;
 use serde_json::{Map, Value};
+use std::ops::Add;
 use std::option::Option;
 use std::str::FromStr;
 use std::string::String;
@@ -213,7 +214,9 @@ impl SDJWTVerifier {
                 .iter()
                 .map(|s| s.as_str()),
         );
-        let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
+        let combined = combined
+            .join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .add(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
         Ok(base64_hash(combined.as_bytes()))
     }

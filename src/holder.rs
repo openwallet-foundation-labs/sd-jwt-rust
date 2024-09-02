@@ -3,6 +3,7 @@ use error::{Error, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::ops::Add;
 use std::str::FromStr;
 use std::time;
 
@@ -332,7 +333,9 @@ impl SDJWTHolder {
         let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 1);
         combined.push(&self.serialized_sd_jwt);
         combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
-        let combined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
+        let combined = combined
+            .join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .add(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
         let sd_hash = base64_hash(combined.as_bytes());
         self.key_binding_jwt_payload
