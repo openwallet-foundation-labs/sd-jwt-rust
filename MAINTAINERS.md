@@ -2,7 +2,8 @@
 
 | Maintainer    | GitHub ID | LFID          | Email                             | Chat ID | Company Affiliation | Scope      |
 |---------------|-----------|---------------|-----------------------------------|---------|---------------------|------------|
-| Sergey Minaev | jovfer    | sergey.minaev | sergey.minaev@dsr-corporation.com |         | DSR Corporation     | repository |
+| Sergey Minaev | jovfer    | sergey.minaev | sergey.minaev.dev@gmail.com       |         |                     | repository |
+| Abdulbois Tursunov | Abdulbois    |  | abdulbois.tursunov@dsr-corporation.com      |              |  DSR Corporation    | repository |
 
 ## What Does Being a Maintainer Entail
 
