@@ -793,6 +793,18 @@ mod tests {
         )
             .unwrap()
             .verified_claims;
-        assert_eq!(user_claims, verified_claims);
+
+        let claims_to_check = json!({
+            "iss": user_claims["iss"].clone(),
+            "iat": user_claims["iat"].clone(),
+            "exp": user_claims["exp"].clone(),
+            "cnf": {
+                "jwk": serde_json::from_str::<Value>(HOLDER_JWK_KEY_ED25519).expect("Valid JSON"),
+            },
+            "sub": user_claims["sub"].clone(),
+            "address": user_claims["address"].clone(),
+        });
+
+        assert_eq!(claims_to_check, verified_claims);
     }
 }
