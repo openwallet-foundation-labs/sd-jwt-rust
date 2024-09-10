@@ -69,7 +69,13 @@ impl SDJWTVerifier {
         verifier.verified_claims = verifier.extract_sd_claims()?;
 
         if let (Some(expected_aud), Some(expected_nonce)) = (&expected_aud, &expected_nonce) {
-            let sign_alg = crate::SDJWTCommon::decode_header_and_get_sign_algorithm(&verifier.sd_jwt_engine.unverified_input_key_binding_jwt.clone().unwrap().to_string());
+            let sign_alg = verifier.sd_jwt_engine.unverified_input_key_binding_jwt
+                .clone()
+                .map(|value| value.to_string())
+                .and_then(|value| {
+                    SDJWTCommon::decode_header_and_get_sign_algorithm(&value)
+                } );
+
             verifier.verify_key_binding_jwt(
                 expected_aud.to_owned(),
                 expected_nonce.to_owned(),
@@ -397,7 +403,7 @@ mod tests {
         "kid": "52128f2e-900e-414e-81c3-0b5f86f0f7b3",
         "kty": "OKP",
         "x": "24QLWXJ18wtbg3k_MDGhGM17Xh39UftuxbwJZzRLzkA"
-}"#;
+    }"#;
 
     #[test]
     fn verify_full_presentation() {
@@ -737,7 +743,7 @@ mod tests {
         assert_eq!(user_claims, verified_claims);
     }
     #[test]
-    fn verify_es256_and_ed25519_algorithms_signings() {
+    fn verify_when_sd_jwt_es256_key_binding_eddsa() {
 
         let user_claims = json!({
             "address": {
@@ -799,7 +805,7 @@ mod tests {
             "iat": user_claims["iat"].clone(),
             "exp": user_claims["exp"].clone(),
             "cnf": {
-                "jwk": serde_json::from_str::<Value>(HOLDER_JWK_KEY_ED25519).expect("Valid JSON"),
+                "jwk": serde_json::from_str::<Value>(HOLDER_JWK_KEY_ED25519).unwrap(),
             },
             "sub": user_claims["sub"].clone(),
             "address": user_claims["address"].clone(),
