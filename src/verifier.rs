@@ -74,7 +74,7 @@ impl SDJWTVerifier {
                 .map(|value| value.to_string())
                 .and_then(|value| {
                     SDJWTCommon::decode_header_and_get_sign_algorithm(&value)
-                } );
+                });
 
             verifier.verify_key_binding_jwt(
                 expected_aud.to_owned(),
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(user_claims, verified_claims);
     }
     #[test]
-    fn verify_when_sd_jwt_es256_key_binding_eddsa() {
+    fn verify_presentation_when_sd_jwt_uses_es256_and_key_binding_uses_eddsa() {
 
         let user_claims = json!({
             "address": {
