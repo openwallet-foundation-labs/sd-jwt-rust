@@ -70,8 +70,7 @@ impl SDJWTVerifier {
 
         if let (Some(expected_aud), Some(expected_nonce)) = (&expected_aud, &expected_nonce) {
             let sign_alg = verifier.sd_jwt_engine.unverified_input_key_binding_jwt
-                .clone()
-                .map(|value| value.to_string())
+                .as_ref()
                 .and_then(|value| {
                     SDJWTCommon::decode_header_and_get_sign_algorithm(&value)
                 });
