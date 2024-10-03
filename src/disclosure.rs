@@ -1,3 +1,7 @@
+// Copyright (c) 2024 DSR Corporation, Denver, Colorado.
+// https://www.dsr-corporation.com
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::utils::{base64_hash, base64url_encode};
 #[cfg(not(feature = "mock_salts"))]
 use crate::utils::generate_salt;

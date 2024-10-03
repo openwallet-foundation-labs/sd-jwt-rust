@@ -1,3 +1,7 @@
+// Copyright (c) 2024 DSR Corporation, Denver, Colorado.
+// https://www.dsr-corporation.com
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::Error;
 use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
 
