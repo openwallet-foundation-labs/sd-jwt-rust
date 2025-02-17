@@ -76,7 +76,7 @@ impl SDJWTVerifier {
             let sign_alg = verifier.sd_jwt_engine.unverified_input_key_binding_jwt
                 .as_ref()
                 .and_then(|value| {
-                    SDJWTCommon::decode_header_and_get_sign_algorithm(&value)
+                    SDJWTCommon::decode_header_and_get_sign_algorithm(value)
                 });
 
             verifier.verify_key_binding_jwt(

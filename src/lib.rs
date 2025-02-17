@@ -146,7 +146,7 @@ impl SDJWTCommon {
             length: parts.len(),
             msg: format!("Invalid SD-JWT: {}", sd_jwt_with_disclosures),
         })?;
-        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);
+        self.sign_alg = Self::decode_header_and_get_sign_algorithm(sd_jwt);
         self.unverified_input_key_binding_jwt = Some(
             parts
                 .next_back()
