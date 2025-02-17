@@ -180,10 +180,10 @@ impl SDJWTVerifier {
                     Algorithm::from_str(sign_alg)
                         .map_err(|e| Error::DeserializationError(e.to_string()))?,
                 );
-                validation.set_audience(&[expected_aud.as_str()]);
+                validation.set_audience(&[&expected_aud]);
                 validation.set_required_spec_claims(&["aud"]);
 
-                jsonwebtoken::decode::<Map<String, Value>>(payload.as_str(), &pubkey, &validation)
+                jsonwebtoken::decode::<Map<String, Value>>(&payload, &pubkey, &validation)
                     .map_err(|e| Error::DeserializationError(e.to_string()))?
             }
             None => {
@@ -216,7 +216,6 @@ impl SDJWTVerifier {
                 .unverified_sd_jwt
                 .as_ref()
                 .ok_or(Error::ConversionError("reference".to_string()))?
-                .as_str(),
         );
         combined.extend(
             self.sd_jwt_engine

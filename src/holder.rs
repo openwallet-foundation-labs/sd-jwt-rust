@@ -313,7 +313,7 @@ impl SDJWTHolder {
         self.set_key_binding_digest_key()?;
         // Create key-binding jwt
         let mut header = Header::new(
-            Algorithm::from_str(alg.as_str())
+            Algorithm::from_str(&alg)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?,
         );
         header.typ = Some(crate::KB_JWT_TYP_HEADER.into());
