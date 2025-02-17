@@ -33,6 +33,7 @@ const CNF_KEY: &str = "cnf";
 const JWK_KEY: &str = "jwk";
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct SDJWTHasSDClaimException(String);
 
 impl SDJWTHasSDClaimException {}
