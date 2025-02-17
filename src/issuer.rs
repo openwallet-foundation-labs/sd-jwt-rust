@@ -317,46 +317,45 @@ impl SDJWTIssuer {
     }
 
     fn create_combined(&mut self) -> Result<()> {
-        if self.inner.serialization_format == SDJWTSerializationFormat::Compact {
-            let mut disclosures: VecDeque<String> = self
-                .all_disclosures
-                .iter()
-                .map(|d| d.raw_b64.to_string())
-                .collect();
-            disclosures.push_front(self.signed_sd_jwt.clone());
-
-            let disclosures: Vec<&str> = disclosures.iter().map(|s| s.as_str()).collect();
-
-            self.serialized_sd_jwt = format!(
-                "{}{}",
-                disclosures.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR),
-                COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
-            );
-        } else if self.inner.serialization_format == SDJWTSerializationFormat::JSON {
-            let jwt: Vec<&str> = self.signed_sd_jwt.split('.').collect();
-            if jwt.len() != 3 {
-                return Err(Error::InvalidInput(format!(
-                    "Invalid JWT, JWT must contain three parts after splitting with \".\": jwt {}",
-                    self.signed_sd_jwt
-                )));
-            }
-            let sd_jwt_json = SDJWTJson {
-                protected: jwt[0].to_owned(),
-                payload: jwt[1].to_owned(),
-                signature: jwt[2].to_owned(),
-                kb_jwt: None,
-                disclosures: self
+        match self.inner.serialization_format  {
+            SDJWTSerializationFormat::Compact => {
+                let mut disclosures: VecDeque<String> = self
                     .all_disclosures
                     .iter()
                     .map(|d| d.raw_b64.to_string())
-                    .collect(),
-            };
-            self.serialized_sd_jwt = serde_json::to_string(&sd_jwt_json)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        } else {
-            return Err(Error::InvalidInput(
-                format!("Unknown serialization format {}, only \"Compact\" or \"JSON\" formats are supported", self.inner.serialization_format)
-            ));
+                    .collect();
+                disclosures.push_front(self.signed_sd_jwt.clone());
+
+                let disclosures: Vec<&str> = disclosures.iter().map(|s| s.as_str()).collect();
+
+                self.serialized_sd_jwt = format!(
+                    "{}{}",
+                    disclosures.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR),
+                    COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+                );
+            },
+            SDJWTSerializationFormat::JSON => {
+                let jwt: Vec<&str> = self.signed_sd_jwt.split('.').collect();
+                if jwt.len() != 3 {
+                    return Err(Error::InvalidInput(format!(
+                        "Invalid JWT, JWT must contain three parts after splitting with \".\": jwt {}",
+                        self.signed_sd_jwt
+                    )));
+                }
+                let sd_jwt_json = SDJWTJson {
+                    protected: jwt[0].to_owned(),
+                    payload: jwt[1].to_owned(),
+                    signature: jwt[2].to_owned(),
+                    kb_jwt: None,
+                    disclosures: self
+                        .all_disclosures
+                        .iter()
+                        .map(|d| d.raw_b64.to_string())
+                        .collect(),
+                };
+                self.serialized_sd_jwt = serde_json::to_string(&sd_jwt_json)
+                    .map_err(|e| Error::DeserializationError(e.to_string()))?;
+            }
         }
 
         Ok(())
