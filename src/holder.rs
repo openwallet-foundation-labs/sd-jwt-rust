@@ -152,20 +152,10 @@ impl SDJWTHolder {
             .unwrap_or(&default_list)
             .iter()
             .filter_map(|digest| {
-                let digest = match digest.as_str() {
-                    Some(digest) => digest,
-                    None => return None,
-                };
-                if let Some(Value::Array(disclosure)) =
-                    self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest)
-                {
-                    let key = match disclosure[1].as_str() {
-                        Some(digest) => digest,
-                        None => return None,
-                    };
-                    return Some((key, (&disclosure[2], digest)));
-                }
-                None
+                let digest = digest.as_str()?;
+                let disclosure = self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest)?;
+                let key = disclosure[1].as_str()?;
+                Some((key, (&disclosure[2], digest)))
             })
             .collect(); //TODO split to 2 maps
         for (key_to_disclose, value_to_disclose) in claims_to_disclose {
@@ -323,7 +313,7 @@ impl SDJWTHolder {
         self.set_key_binding_digest_key()?;
         // Create key-binding jwt
         let mut header = Header::new(
-            Algorithm::from_str(alg.as_str())
+            Algorithm::from_str(&alg)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?,
         );
         header.typ = Some(crate::KB_JWT_TYP_HEADER.into());
