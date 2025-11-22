@@ -117,7 +117,7 @@ impl SDJWTIssuer {
 
     /// Creates a new SDJWTIssuer instance.
     ///
-    /// The instance can be used mutliple times to issue SD-JWTs.
+    /// The instance can be used multiple times to issue SD-JWTs.
     ///
     /// # Arguments
     /// * `issuer_key` - The key used to sign the SD-JWT.

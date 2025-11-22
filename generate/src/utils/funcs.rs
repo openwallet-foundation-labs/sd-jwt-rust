@@ -12,7 +12,7 @@ use sd_jwt_rs::utils::SALTS;
 use crate::error::{Error, ErrorKind, Result};
 
 
-pub fn parse_sdjwt_paylod(
+pub fn parse_sd_jwt_payload(
     sd_jwt: &str,
     serialization_format: &SDJWTSerializationFormat,
     remove_decoy: bool
@@ -29,21 +29,36 @@ pub fn parse_sdjwt_paylod(
 }
 
 fn parse_payload_json(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
-    let v: serde_json::Value = serde_json::from_str(sd_jwt).unwrap();
+    let json_value: serde_json::Value = serde_json::from_str(sd_jwt)?;
+    let json_object = json_value.as_object().unwrap();
 
-    let disclosures = v.as_object().unwrap().get("disclosures").unwrap();
+    // Try to use top-level "disclosures" property, if present
+    let disclosures = if json_object.contains_key("disclosures") {
+        json_object.get("disclosures").unwrap()
+    }
+    else {
+        // Retrieve "header" property, taking into account both flattened and general JSON serialization format
+        let header = match json_object.get("header") {
+            // Flattened format
+            Some(value) => value,
+            // General format ("header" property is included in the first signature entry)
+            None => json_object.get("signatures").unwrap().as_array().unwrap().get(0).unwrap().as_object().unwrap().get("header").unwrap()
+        };
+
+        &header.as_object().unwrap().get("disclosures").unwrap()
+    };
 
     let mut hashes: HashSet<String> = HashSet::new();
 
     for disclosure in disclosures.as_array().unwrap() {
-        let hash = base64_hash(disclosure.as_str().unwrap().replace(' ', "").as_bytes());
+        let hash = base64_hash(disclosure.as_str().unwrap().as_bytes());
         hashes.insert(hash.clone());
     }
 
-    let ddd = v.as_object().unwrap().get("payload").unwrap().as_str().unwrap().replace(' ', "");
-    let payload = base64url_decode(&ddd).unwrap();
+    let base64_payload = json_value.as_object().unwrap().get("payload").unwrap().as_str().unwrap();
+    let payload = base64url_decode(&base64_payload).unwrap();
 
-    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&payload)?;
 
     if remove_decoy {
         return Ok(remove_decoy_items(&payload, &hashes));
@@ -54,10 +69,10 @@ fn parse_payload_json(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
 
 fn parse_payload_compact(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
     let mut disclosures: Vec<String> = sd_jwt
-            .split('~')
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
+        .split('~')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
 
     let payload = disclosures.remove(0);
 
@@ -73,7 +88,7 @@ fn parse_payload_compact(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
 
     let payload = base64url_decode(&payload).unwrap();
 
-    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&payload)?;
 
     if remove_decoy {
         return Ok(remove_decoy_items(&payload, &hashes));

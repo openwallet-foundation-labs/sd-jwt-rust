@@ -274,7 +274,7 @@ impl SDJWTVerifier {
                 Value::Object(obj) if obj.contains_key(SD_LIST_PREFIX) => {
                     if obj.len() > 1 {
                         return Err(Error::InvalidDisclosure(
-                            "Disclosed claim object in an array maust contain only one key".to_string(),
+                            "Disclosed claim object in an array must contain only one key".to_string(),
                         ));
                     }
 

@@ -9,7 +9,7 @@ mod utils;
 use jsonwebtoken::jwk::Jwk;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::utils::funcs::{parse_sdjwt_paylod, load_salts};
+use crate::utils::funcs::{parse_sd_jwt_payload, load_salts};
 use clap::Parser;
 use jsonwebtoken::{EncodingKey, DecodingKey};
 use sd_jwt_rs::issuer::{ClaimsForSelectiveDisclosureStrategy, SDJWTIssuer};
@@ -88,10 +88,10 @@ fn generate_and_check(
 
     let loaded_sd_jwt = load_sd_jwt(&stored_sd_jwt_file_path)?;
 
-    let loaded_sdjwt_paylod = parse_sdjwt_paylod(&loaded_sd_jwt.replace('\n', ""), &serialization_format, decoy)?;
-    let issued_sdjwt_paylod = parse_sdjwt_paylod(&sd_jwt, &serialization_format, decoy)?;
+    let loaded_sd_jwt_payload = parse_sd_jwt_payload(&loaded_sd_jwt.replace('\n', "").replace('\r', "").replace(' ', ""), &serialization_format, decoy)?;
+    let issued_sd_jwt_payload = parse_sd_jwt_payload(&sd_jwt, &serialization_format, decoy)?;
 
-    compare_jwt_payloads(&loaded_sdjwt_paylod, &issued_sdjwt_paylod)?;
+    compare_jwt_payloads(&loaded_sd_jwt_payload, &issued_sd_jwt_payload)?;
 
     let loaded_verified_claims_content = load_sd_jwt(&directory.join(VERIFIED_CLAIMS_FILE_NAME))?;
     let loaded_verified_claims = parse_verified_claims(&loaded_verified_claims_content)?;
@@ -123,7 +123,7 @@ fn issue_sd_jwt(
     }
 
     if !claims_obj.contains_key("exp") {
-        let exp = settings.exp.expect("'expt' value must be provided by settings.yml");
+        let exp = settings.exp.expect("'exp' value must be provided by settings.yml");
         claims_obj.insert(String::from("exp"), Value::Number(Number::from(exp)));
     }
 
