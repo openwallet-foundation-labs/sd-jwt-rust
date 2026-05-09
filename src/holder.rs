@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    error, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTGeneralJsonSignature, SDJWTSerializationFormat,
-    SDJWTUnprotectedHeader,
+    error, KeyResolver, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTGeneralJsonSignature,
+    SDJWTSerializationFormat, SDJWTUnprotectedHeader,
 };
 use error::{Error, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -37,6 +37,7 @@ impl SDJWTHolder {
     /// # Arguments
     /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`
     /// * `serialization_format` - Serialization format of the SD JWT, see [SDJWTSerializationFormat].
+    /// * `cb_get_issuer_key` - Callback returning the Issuer's public key, used to verify the Issuer signature. Use [`SDJWTHolder::new_unverified`] to skip verification.
     ///
     /// # Returns
     /// * `SDJWTHolder` - Instance of SDJWTHolder
@@ -45,7 +46,40 @@ impl SDJWTHolder {
     /// * `InvalidInput` - If the serialization format is not supported
     /// * `InvalidState` - If the SD JWT data is not valid
     /// * `DeserializationError` - If the SD JWT serialization is not valid
-    pub fn new(sd_jwt_with_disclosures: String, serialization_format: SDJWTSerializationFormat) -> Result<Self> {
+    pub fn new(
+        sd_jwt_with_disclosures: String,
+        serialization_format: SDJWTSerializationFormat,
+        cb_get_issuer_key: Box<KeyResolver>,
+    ) -> Result<Self> {
+        Self::build(sd_jwt_with_disclosures, serialization_format, Some(cb_get_issuer_key))
+    }
+
+    /// Like [`SDJWTHolder::new`], but skips Issuer-signature verification —
+    /// for inputs already verified out of band or for test fixtures.
+    ///
+    /// # Arguments
+    /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`
+    /// * `serialization_format` - Serialization format of the SD JWT, see [SDJWTSerializationFormat].
+    ///
+    /// # Returns
+    /// * `SDJWTHolder` - Instance of SDJWTHolder
+    ///
+    /// # Errors
+    /// * `InvalidInput` - If the serialization format is not supported
+    /// * `InvalidState` - If the SD JWT data is not valid
+    /// * `DeserializationError` - If the SD JWT serialization is not valid
+    pub fn new_unverified(
+        sd_jwt_with_disclosures: String,
+        serialization_format: SDJWTSerializationFormat,
+    ) -> Result<Self> {
+        Self::build(sd_jwt_with_disclosures, serialization_format, None)
+    }
+
+    fn build(
+        sd_jwt_with_disclosures: String,
+        serialization_format: SDJWTSerializationFormat,
+        cb_get_issuer_key: Option<Box<KeyResolver>>,
+    ) -> Result<Self> {
         let mut holder = SDJWTHolder {
             sd_jwt_engine: SDJWTCommon {
                 serialization_format,
@@ -74,7 +108,27 @@ impl SDJWTHolder {
             ));
         }
 
-        //TODO Verify signature before accepting the JWT
+        if let Some(cb_get_issuer_key) = cb_get_issuer_key {
+            let engine = &holder.sd_jwt_engine;
+            let sd_jwt = engine
+                .unverified_sd_jwt
+                .as_ref()
+                .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
+            let header = jsonwebtoken::decode_header(sd_jwt)
+                .map_err(|e| Error::DeserializationError(e.to_string()))?;
+            let unverified_issuer = engine
+                .unverified_input_sd_jwt_payload
+                .as_ref()
+                .ok_or(Error::InvalidState("Cannot reference payload".to_string()))?
+                .get("iss")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Error::InvalidInput("Issuer-signed JWT is missing `iss`".to_string())
+                })?;
+            let key = cb_get_issuer_key(unverified_issuer, &header);
+            engine.verify_signature(&key)?;
+        }
+
         holder.sd_jwt_payload = holder
             .sd_jwt_engine
             .unverified_input_sd_jwt_payload
@@ -377,12 +431,195 @@ impl SDJWTHolder {
 #[cfg(test)]
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
-    use crate::{SDJWTHolder, SDJWTIssuer, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, SDJWTSerializationFormat};
-    use jsonwebtoken::EncodingKey;
+    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
     use serde_json::{json, Map, Value};
     use std::collections::HashSet;
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
+    const PUBLIC_ISSUER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEb28d4MwZMjw8+00CG4xfnn9SLMVM\nM19SlqZpVb/uNtRe/nNbC6hpOB1LqFXjfIjqAHBOeO6SYVBCcn+QLHOqTw==\n-----END PUBLIC KEY-----\n";
+
+    fn issuer_key_resolver() -> Box<crate::KeyResolver> {
+        Box::new(|_iss: &str, _hdr: &jsonwebtoken::Header| {
+            DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()
+        })
+    }
+
+    #[test]
+    fn new_accepts_valid_signature() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let holder = SDJWTHolder::new(
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
+        );
+        assert!(holder.is_ok());
+    }
+
+    #[test]
+    fn new_rejects_tampered_signature() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        // Corrupt the first character of the JWT signature segment. A leading
+        // base64url character maps to full signature bytes, so this yields a
+        // well-formed but cryptographically invalid signature and exercises the
+        // ECDSA rejection path — unlike flipping the trailing character, whose
+        // spare bits can fail base64 decoding before verification is reached.
+        let parts: Vec<&str> = sd_jwt.split('~').collect();
+        let jwt_pieces: Vec<&str> = parts[0].split('.').collect();
+        let mut sig: Vec<char> = jwt_pieces[2].chars().collect();
+        sig[0] = if sig[0] == 'A' { 'B' } else { 'A' };
+        let sig: String = sig.into_iter().collect();
+        let tampered_jwt = format!("{}.{}.{}", jwt_pieces[0], jwt_pieces[1], sig);
+        let tampered = std::iter::once(tampered_jwt.as_str())
+            .chain(parts.iter().skip(1).copied())
+            .collect::<Vec<_>>()
+            .join("~");
+
+        let result = SDJWTHolder::new(
+            tampered,
+            SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_unverified_accepts_tampered_signature() {
+        // `new_unverified` is the explicit opt-out of Issuer-signature
+        // verification, for inputs already verified out of band or for test
+        // fixtures: an SD-JWT whose signature would not verify is accepted.
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let parts: Vec<&str> = sd_jwt.split('~').collect();
+        let jwt_pieces: Vec<&str> = parts[0].split('.').collect();
+        let mut sig: Vec<char> = jwt_pieces[2].chars().collect();
+        sig[0] = if sig[0] == 'A' { 'B' } else { 'A' };
+        let sig: String = sig.into_iter().collect();
+        let tampered_jwt = format!("{}.{}.{}", jwt_pieces[0], jwt_pieces[1], sig);
+        let tampered = std::iter::once(tampered_jwt.as_str())
+            .chain(parts.iter().skip(1).copied())
+            .collect::<Vec<_>>()
+            .join("~");
+
+        let result = SDJWTHolder::new_unverified(tampered, SDJWTSerializationFormat::Compact);
+        assert!(
+            result.is_ok(),
+            "new_unverified must accept an SD-JWT without verifying its signature",
+        );
+    }
+
+    #[test]
+    fn new_accepts_issuer_jwt_with_aud() {
+        // An Issuer-signed JWT may legitimately carry an `aud` claim; the Holder's
+        // signature check must accept it rather than reject it for lack of an
+        // expected audience. NoSDClaims keeps `aud` as a plaintext top-level claim.
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "aud": "https://verifier.example.com",
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let holder = SDJWTHolder::new(
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
+        );
+        assert!(
+            holder.is_ok(),
+            "Holder rejected a validly-signed Issuer JWT carrying an `aud` claim",
+        );
+    }
+
+    #[test]
+    fn new_rejects_issuer_jwt_with_future_nbf() {
+        // An SD-JWT whose `nbf` is in the future is not yet valid.
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "nbf": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTHolder::new(
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
+        );
+        match result {
+            Ok(_) => panic!("holder accepted an SD-JWT with a future `nbf`"),
+            Err(err) => assert!(
+                err.to_string().contains("ImmatureSignature"),
+                "expected an immature-signature failure, got: {err}"
+            ),
+        }
+    }
 
     #[test]
     fn new_rejects_sd_jwt_with_key_binding() {
@@ -409,7 +646,7 @@ mod tests {
         assert!(sd_jwt.ends_with(COMBINED_SERIALIZATION_FORMAT_SEPARATOR));
         let sd_jwt_kb = format!("{sd_jwt}fakekbjwt");
 
-        let result = SDJWTHolder::new(sd_jwt_kb, SDJWTSerializationFormat::Compact);
+        let result = SDJWTHolder::new_unverified(sd_jwt_kb, SDJWTSerializationFormat::Compact);
         assert!(
             result.is_err(),
             "Holder accepted an SD-JWT that already carried a Key Binding JWT",
@@ -443,6 +680,7 @@ mod tests {
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
         )
             .unwrap()
             .create_presentation(
@@ -483,7 +721,7 @@ mod tests {
         let issued = sd_jwt.clone();
         user_claims["address"] = Value::Object(Map::new());
         let presentation =
-            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
+            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact, issuer_key_resolver())
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),
@@ -555,7 +793,7 @@ mod tests {
         let issued = sd_jwt.clone();
         println!("{}", issued);
         let presentation =
-            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
+            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
                 .unwrap()
                 .create_presentation(
                     user_claims.as_object().unwrap().clone(),
@@ -676,7 +914,7 @@ mod tests {
         );
 
         let presentation =
-            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
+            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
                 .unwrap()
                 .create_presentation(
                     revealed.as_object().unwrap().clone(),
