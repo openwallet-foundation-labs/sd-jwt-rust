@@ -198,11 +198,9 @@ impl SDJWTVerifier {
         if key_binding_jwt.claims.get("nonce") != Some(&Value::String(expected_nonce)) {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
-        if self.sd_jwt_engine.serialization_format == SDJWTSerializationFormat::Compact {
-            let sd_hash = self._get_key_binding_digest_hash()?;
-            if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
-                return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
-            }
+        let sd_hash = self._get_key_binding_digest_hash()?;
+        if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
+            return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
         }
 
         Ok(())
@@ -387,7 +385,8 @@ impl SDJWTVerifier {
 #[cfg(test)]
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier, SDJWTSerializationFormat};
+    use crate::utils::base64url_encode;
+    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use serde_json::{json, Value};
 
@@ -814,5 +813,74 @@ mod tests {
         });
 
         assert_eq!(claims_to_check, verified_claims);
+    }
+
+    #[test]
+    fn reject_tampered_json_presentation_with_injected_disclosure() {
+        let user_claims = json!({
+            "address": {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+            },
+            "exp": 1883000000,
+            "iat": 1683000000,
+            "iss": "https://example.com/issuer",
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+        });
+
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string())).issue_sd_jwt(
+            user_claims.clone(),
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
+            Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+            false,
+            SDJWTSerializationFormat::JSON,
+        ).unwrap();
+
+        let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
+        let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
+        let nonce = Some(String::from("testNonce"));
+        let aud = Some(String::from("testAud"));
+
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::JSON)
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                nonce.clone(),
+                aud.clone(),
+                Some(holder_key),
+                Some("EdDSA".to_string()),
+            )
+            .unwrap();
+
+        // Tamper: inject a syntactically-valid extra disclosure into the JSON
+        // presentation. The KB-JWT's sd_hash was computed by the holder over
+        // the original disclosure list, so the verifier MUST detect the
+        // mismatch on the augmented presentation.
+        let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
+        let injected_disclosure =
+            base64url_encode(br#"["injectedsalt", "injected_claim", "value"]"#);
+        json.disclosures.push(injected_disclosure);
+        let tampered = serde_json::to_string(&json).unwrap();
+
+        let result = SDJWTVerifier::new(
+            tampered,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            aud,
+            nonce,
+            SDJWTSerializationFormat::JSON,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted JSON presentation with tampered disclosure list",
+        );
     }
 }
