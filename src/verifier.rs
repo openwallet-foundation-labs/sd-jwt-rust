@@ -198,6 +198,9 @@ impl SDJWTVerifier {
         if key_binding_jwt.claims.get("nonce") != Some(&Value::String(expected_nonce)) {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
+        if !key_binding_jwt.claims.contains_key("iat") {
+            return Err(Error::InvalidInput("Missing required `iat` claim in KB-JWT".to_string()));
+        }
         let sd_hash = self._get_key_binding_digest_hash()?;
         if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
             return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
@@ -385,10 +388,10 @@ impl SDJWTVerifier {
 #[cfg(test)]
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
-    use crate::utils::base64url_encode;
+    use crate::utils::{base64url_decode, base64url_encode};
     use crate::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
-    use jsonwebtoken::{DecodingKey, EncodingKey};
-    use serde_json::{json, Value};
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
+    use serde_json::{json, Map, Value};
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
     const PUBLIC_ISSUER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEb28d4MwZMjw8+00CG4xfnn9SLMVM\nM19SlqZpVb/uNtRe/nNbC6hpOB1LqFXjfIjqAHBOeO6SYVBCcn+QLHOqTw==\n-----END PUBLIC KEY-----\n";
@@ -881,6 +884,86 @@ mod tests {
         assert!(
             result.is_err(),
             "Verifier accepted JSON presentation with tampered disclosure list",
+        );
+    }
+
+    #[test]
+    fn reject_kb_jwt_missing_iat_claim() {
+        let user_claims = json!({
+            "address": {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+            },
+            "exp": 1883000000,
+            "iat": 1683000000,
+            "iss": "https://example.com/issuer",
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+        });
+
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string())).issue_sd_jwt(
+            user_claims.clone(),
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
+            Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+            false,
+            SDJWTSerializationFormat::JSON,
+        ).unwrap();
+
+        let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
+        let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
+        let nonce = Some(String::from("testNonce"));
+        let aud = Some(String::from("testAud"));
+
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::JSON)
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                nonce.clone(),
+                aud.clone(),
+                Some(holder_key),
+                Some("EdDSA".to_string()),
+            )
+            .unwrap();
+
+        // Tamper: re-sign the KB-JWT with the `iat` claim stripped from the
+        // payload. The KB-JWT remains validly signed by the holder key, so
+        // signature verification will pass — but the spec requires `iat` to
+        // be present, and the verifier must reject this presentation.
+        let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
+        let original_kb_jwt = json.kb_jwt.clone().unwrap();
+        let kb_parts: Vec<&str> = original_kb_jwt.split('.').collect();
+        let payload_bytes = base64url_decode(kb_parts[1]).unwrap();
+        let mut kb_payload: Map<String, Value> =
+            serde_json::from_slice(&payload_bytes).unwrap();
+        kb_payload.remove("iat");
+
+        let resign_key =
+            EncodingKey::from_ed_pem(HOLDER_KEY_ED25519.as_bytes()).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(crate::KB_JWT_TYP_HEADER.to_string());
+        let tampered_kb_jwt =
+            jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
+
+        json.kb_jwt = Some(tampered_kb_jwt);
+        let tampered_presentation = serde_json::to_string(&json).unwrap();
+
+        let result = SDJWTVerifier::new(
+            tampered_presentation,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            aud,
+            nonce,
+            SDJWTSerializationFormat::JSON,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted KB-JWT presentation missing required `iat` claim",
         );
     }
 }
