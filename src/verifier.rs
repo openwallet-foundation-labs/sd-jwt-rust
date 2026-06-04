@@ -243,7 +243,24 @@ impl SDJWTVerifier {
 
         self.duplicate_hash_check = Vec::new();
         let claims: Value = self.sd_jwt_payload.clone().into_iter().collect();
-        self.unpack_disclosed_claims(&claims)
+        let unpacked = self.unpack_disclosed_claims(&claims)?;
+
+        // Draft-07 section 8.1 step 5: if any presented Disclosure was not
+        // referenced by digest value in the Issuer-signed JWT (directly or
+        // recursively via other Disclosures), the SD-JWT MUST be rejected.
+        // `duplicate_hash_check` accumulates every digest encountered during
+        // the recursive unpack, so any disclosure whose hash is absent from
+        // that list is unreferenced.
+        for disclosure_hash in self.sd_jwt_engine.hash_to_decoded_disclosure.keys() {
+            if !self.duplicate_hash_check.contains(disclosure_hash) {
+                return Err(Error::InvalidDisclosure(format!(
+                    "Disclosure was not referenced by any digest in the SD-JWT: {}",
+                    disclosure_hash
+                )));
+            }
+        }
+
+        Ok(unpacked)
     }
 
     fn unpack_disclosed_claims(&mut self, sd_jwt_claims: &Value) -> Result<Value> {
@@ -389,7 +406,7 @@ impl SDJWTVerifier {
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::utils::{base64url_decode, base64url_encode};
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
+    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
     use serde_json::{json, Map, Value};
 
@@ -964,6 +981,76 @@ mod tests {
         assert!(
             result.is_err(),
             "Verifier accepted KB-JWT presentation missing required `iat` claim",
+        );
+    }
+
+    #[test]
+    fn reject_presentation_with_unreferenced_disclosure() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+            }
+        });
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
+            user_claims.clone(),
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
+            None,
+            false,
+            SDJWTSerializationFormat::Compact,
+        )
+            .unwrap();
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Append a syntactically-valid but unreferenced disclosure. The
+        // legitimate disclosures still hash and unpack normally; only the
+        // injected disclosure is not referenced by any digest in the
+        // Issuer-signed JWT, so the verifier must reject per draft-07 §8.1.
+        let injected = base64url_encode(
+            br#"["unreferencedsalt", "unreferenced_claim", "value"]"#,
+        );
+        let presentation = presentation.trim_end_matches(
+            COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+        );
+        let tampered = format!(
+            "{}{}{}{}",
+            presentation,
+            COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+            injected,
+            COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+        );
+
+        let result = SDJWTVerifier::new(
+            tampered,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted presentation with unreferenced disclosure",
         );
     }
 }
