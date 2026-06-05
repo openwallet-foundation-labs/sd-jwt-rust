@@ -140,7 +140,6 @@ impl SDJWTCommon {
                 parts.len()
             )));
         }
-        let idx = parts.len();
         let mut parts = parts.into_iter();
         let sd_jwt = parts.next().ok_or(Error::IndexOutOfBounds {
             idx: 0,
@@ -148,19 +147,12 @@ impl SDJWTCommon {
             msg: format!("Invalid SD-JWT: {}", sd_jwt_with_disclosures),
         })?;
         self.sign_alg = Self::decode_header_and_get_sign_algorithm(sd_jwt);
-        self.unverified_input_key_binding_jwt = Some(
-            parts
-                .next_back()
-                .ok_or(Error::IndexOutOfBounds {
-                    idx: idx - 1,
-                    length: idx,
-                    msg: format!(
-                        "Invalid SD-JWT. Key binding not found: {}",
-                        sd_jwt_with_disclosures
-                    ),
-                })?
-                .to_owned(),
-        );
+        let trailing = parts.next_back().unwrap_or("");
+        self.unverified_input_key_binding_jwt = if trailing.is_empty() {
+            None
+        } else {
+            Some(trailing.to_owned())
+        };
         self.input_disclosures = parts.map(str::to_owned).collect();
         self.unverified_sd_jwt = Some(sd_jwt.to_owned());
 
@@ -240,7 +232,12 @@ mod tests {
         let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
         sdjwt.parse_compact_sd_jwt(format!("jwt1.{encoded_empty_object}.jwt3~disc1~disc2~kbjwt")).unwrap();
         assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
-        assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
+        assert_eq!(sdjwt.unverified_input_key_binding_jwt.as_deref(), Some("kbjwt"));
+        assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
+
+        let mut sdjwt = SDJWTCommon::default();
+        sdjwt.parse_compact_sd_jwt(format!("jwt1.{encoded_empty_object}.jwt3~disc1~disc2~")).unwrap();
+        assert!(sdjwt.unverified_input_key_binding_jwt.is_none());
         assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
     }
 
