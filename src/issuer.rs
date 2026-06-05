@@ -346,12 +346,14 @@ impl SDJWTIssuer {
                     protected: jwt[0].to_owned(),
                     payload: jwt[1].to_owned(),
                     signature: jwt[2].to_owned(),
-                    kb_jwt: None,
-                    disclosures: self
-                        .all_disclosures
-                        .iter()
-                        .map(|d| d.raw_b64.to_string())
-                        .collect(),
+                    header: crate::SDJWTUnprotectedHeader {
+                        kb_jwt: None,
+                        disclosures: self
+                            .all_disclosures
+                            .iter()
+                            .map(|d| d.raw_b64.to_string())
+                            .collect(),
+                    },
                 };
                 self.serialized_sd_jwt = serde_json::to_string(&sd_jwt_json)
                     .map_err(|e| Error::DeserializationError(e.to_string()))?;
