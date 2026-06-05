@@ -116,10 +116,14 @@ impl SDJWTVerifier {
                 .map_err(|e| Error::DeserializationError(e.to_string()))?,
             None => Algorithm::ES256, // Default or handle as needed
         };
+        let mut validation = Validation::new(algorithm);
+        // RFC 9901 §4.1: `exp` is not mandated, so don't require it. `validate_exp`
+        // stays true, so a present `exp` is still checked for expiry.
+        validation.required_spec_claims.remove("exp");
         let claims = jsonwebtoken::decode(
             sd_jwt,
             &issuer_public_key,
-            &Validation::new(algorithm),
+            &validation,
         )
             .map_err(|e| Error::DeserializationError(format!("Cannot decode jwt: {}", e)))?
             .claims;
@@ -1105,5 +1109,80 @@ mod tests {
             result.is_err(),
             "Verifier accepted presentation with unreferenced disclosure",
         );
+    }
+
+    #[test]
+    fn verify_presentation_without_exp() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact)
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let result = SDJWTVerifier::new(
+            presentation,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(result.is_ok(), "verifier rejected `exp`-less SD-JWT");
+    }
+
+    #[test]
+    fn reject_presentation_with_expired_exp() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1683000300,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted a presentation with an expired `exp`"),
+            Err(err) => assert!(
+                err.to_string().contains("ExpiredSignature"),
+                "expected an expiry failure, got: {err}"
+            ),
+        }
     }
 }
