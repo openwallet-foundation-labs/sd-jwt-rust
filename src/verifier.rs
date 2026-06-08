@@ -241,6 +241,13 @@ impl SDJWTVerifier {
             )));
         }
 
+        for (key, value) in self.sd_jwt_payload.iter() {
+            if key == DIGEST_ALG_KEY {
+                continue;
+            }
+            Self::reject_nested_sd_alg(value)?;
+        }
+
         self.duplicate_hash_check = Vec::new();
         let claims: Value = self.sd_jwt_payload.clone().into_iter().collect();
         let unpacked = self.unpack_disclosed_claims(&claims)?;
@@ -261,6 +268,22 @@ impl SDJWTVerifier {
         }
 
         Ok(unpacked)
+    }
+
+    fn reject_nested_sd_alg(value: &Value) -> Result<()> {
+        match value {
+            Value::Object(obj) => {
+                if obj.contains_key(DIGEST_ALG_KEY) {
+                    return Err(Error::DataFieldMismatch(format!(
+                        "`{}` is only allowed at the top level of the SD-JWT payload",
+                        DIGEST_ALG_KEY
+                    )));
+                }
+                obj.values().try_for_each(Self::reject_nested_sd_alg)
+            }
+            Value::Array(arr) => arr.iter().try_for_each(Self::reject_nested_sd_alg),
+            _ => Ok(()),
+        }
     }
 
     fn unpack_disclosed_claims(&mut self, sd_jwt_claims: &Value) -> Result<Value> {
@@ -425,6 +448,36 @@ mod tests {
         "kty": "OKP",
         "x": "24QLWXJ18wtbg3k_MDGhGM17Xh39UftuxbwJZzRLzkA"
     }"#;
+
+    #[test]
+    fn reject_sd_jwt_with_nested_sd_alg() {
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "_sd_alg": "sha-256",
+            "address": { "_sd_alg": "sha-256" }
+        });
+        let header = Header::new(Algorithm::ES256);
+        let signed = jsonwebtoken::encode(&header, &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+
+        assert!(result.is_err(), "verifier accepted a nested `_sd_alg`");
+        let err = format!("{}", result.err().unwrap());
+        assert!(
+            err.contains("only allowed at the top level"),
+            "wrong error: {err}"
+        );
+    }
 
     #[test]
     fn verify_full_presentation() {
