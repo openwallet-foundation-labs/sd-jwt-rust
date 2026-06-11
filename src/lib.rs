@@ -109,10 +109,10 @@ impl SDJWTCommon {
         match the_object {
             Value::Object(obj) => {
                 for (key, value) in obj.iter() {
-                    if key == SD_DIGESTS_KEY {
+                    if key == SD_DIGESTS_KEY || key == SD_LIST_PREFIX {
                         return Err(Error::DataFieldMismatch(format!(
                             "Claim object cannot have `{}` field",
-                            SD_DIGESTS_KEY
+                            key
                         )));
                     } else {
                         Self::check_for_sd_claim(value)?;
@@ -231,6 +231,7 @@ impl SDJWTCommon {
 #[cfg(test)]
 mod tests {
     use crate::{utils, SDJWTCommon};
+    use serde_json::json;
 
 
     #[test]
@@ -253,5 +254,23 @@ mod tests {
         assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
         assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
         assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
+    }
+
+    #[test]
+    fn test_disallow_reserved_words_as_claim_names() {
+        for (claims, reserved) in [
+            (json!({ "_sd": "x" }), "_sd"),
+            (json!({ "...": "x" }), "..."),
+        ] {
+            let err = SDJWTCommon::check_for_sd_claim(&claims).unwrap_err();
+            assert!(
+                format!("{err}").contains("cannot have"),
+                "reserved word `{reserved}` was allowed as a claim name: {err}"
+            );
+        }
+        assert!(
+            SDJWTCommon::check_for_sd_claim(&json!({ "address": { "street": "x" } })).is_ok(),
+            "a claim object without reserved words was rejected"
+        );
     }
 }
