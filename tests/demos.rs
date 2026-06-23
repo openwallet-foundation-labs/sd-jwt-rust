@@ -356,19 +356,20 @@ fn demo_positive_cases(
         let mut issued: SDJWTJson = serde_json::from_str(&issued).unwrap();
         let mut revealed: SDJWTJson = serde_json::from_str(&presentation).unwrap();
         let disclosures: Vec<String> = revealed
+            .header
             .disclosures
             .clone()
             .into_iter()
-            .filter(|d| issued.disclosures.contains(d))
+            .filter(|d| issued.header.disclosures.contains(d))
             .collect();
         assert_eq!(number_of_revealed_sds, disclosures.len());
 
         if holder_jwk.is_some() {
-            assert!(revealed.kb_jwt.is_some());
+            assert!(revealed.header.kb_jwt.is_some());
         }
 
-        issued.disclosures = disclosures;
-        revealed.kb_jwt = None;
+        issued.header.disclosures = disclosures;
+        revealed.header.kb_jwt = None;
         assert_eq!(revealed, issued);
     }
 

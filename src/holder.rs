@@ -128,9 +128,9 @@ impl SDJWTHolder {
                 .sd_jwt_json
                 .take()
                 .ok_or(Error::InvalidState("Cannot take SDJWTJson".to_string()))?;
-            sd_jwt_json.disclosures = self.hs_disclosures.clone();
+            sd_jwt_json.header.disclosures = self.hs_disclosures.clone();
             if !self.serialized_key_binding_jwt.is_empty() {
-                sd_jwt_json.kb_jwt = Some(self.serialized_key_binding_jwt.clone());
+                sd_jwt_json.header.kb_jwt = Some(self.serialized_key_binding_jwt.clone());
             }
             serde_json::to_string(&sd_jwt_json)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?

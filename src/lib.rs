@@ -67,7 +67,13 @@ pub struct SDJWTJson {
     protected: String,
     payload: String,
     signature: String,
+    pub header: SDJWTUnprotectedHeader,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+pub struct SDJWTUnprotectedHeader {
     pub disclosures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kb_jwt: Option<String>,
 }
 
@@ -174,8 +180,8 @@ impl SDJWTCommon {
         let parsed_sd_jwt_json: SDJWTJson = serde_json::from_str(&sd_jwt_with_disclosures)
             .map_err(|e| Error::DeserializationError(e.to_string()))?;
         self.unverified_sd_jwt_json = Some(parsed_sd_jwt_json.clone());
-        self.unverified_input_key_binding_jwt = parsed_sd_jwt_json.kb_jwt;
-        self.input_disclosures = parsed_sd_jwt_json.disclosures;
+        self.unverified_input_key_binding_jwt = parsed_sd_jwt_json.header.kb_jwt;
+        self.input_disclosures = parsed_sd_jwt_json.header.disclosures;
         self.unverified_input_sd_jwt_payload =
             Some(jwt_payload_decode(&parsed_sd_jwt_json.payload)?);
         let sd_jwt = format!(
@@ -246,7 +252,7 @@ mod tests {
         let mut sdjwt = SDJWTCommon::default();
         let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
         sdjwt.parse_json_sd_jwt(format!(
-            "{{\"protected\":\"jwt1\",\"payload\":\"{encoded_empty_object}\",\"signature\":\"jwt3\",\"disclosures\":[\"disc1\",\"disc2\"],\"kb_jwt\":\"kbjwt\"}}"
+            "{{\"protected\":\"jwt1\",\"payload\":\"{encoded_empty_object}\",\"signature\":\"jwt3\",\"header\":{{\"disclosures\":[\"disc1\",\"disc2\"],\"kb_jwt\":\"kbjwt\"}}}}"
         )).unwrap();
         assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
         assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");

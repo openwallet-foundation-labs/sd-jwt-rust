@@ -941,7 +941,7 @@ mod tests {
         let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
         let injected_disclosure =
             base64url_encode(br#"["injectedsalt", "injected_claim", "value"]"#);
-        json.disclosures.push(injected_disclosure);
+        json.header.disclosures.push(injected_disclosure);
         let tampered = serde_json::to_string(&json).unwrap();
 
         let result = SDJWTVerifier::new(
@@ -1007,7 +1007,7 @@ mod tests {
         // signature verification will pass — but the spec requires `iat` to
         // be present, and the verifier must reject this presentation.
         let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
-        let original_kb_jwt = json.kb_jwt.clone().unwrap();
+        let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
         let kb_parts: Vec<&str> = original_kb_jwt.split('.').collect();
         let payload_bytes = base64url_decode(kb_parts[1]).unwrap();
         let mut kb_payload: Map<String, Value> =
@@ -1021,7 +1021,7 @@ mod tests {
         let tampered_kb_jwt =
             jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
 
-        json.kb_jwt = Some(tampered_kb_jwt);
+        json.header.kb_jwt = Some(tampered_kb_jwt);
         let tampered_presentation = serde_json::to_string(&json).unwrap();
 
         let result = SDJWTVerifier::new(
