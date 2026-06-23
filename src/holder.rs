@@ -2,7 +2,10 @@
 // https://www.dsr-corporation.com
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{error, SDJWTJson, SDJWTSerializationFormat};
+use crate::{
+    error, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTGeneralJsonSignature, SDJWTSerializationFormat,
+    SDJWTUnprotectedHeader,
+};
 use error::{Error, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Map, Value};
@@ -14,8 +17,8 @@ use std::time;
 use crate::utils::base64_hash;
 use crate::SDJWTCommon;
 use crate::{
-    COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, KB_DIGEST_KEY, SD_DIGESTS_KEY,
-    SD_LIST_PREFIX,
+    COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG, KB_DIGEST_KEY, KB_JWT_TYP_HEADER,
+    SD_DIGESTS_KEY, SD_LIST_PREFIX,
 };
 
 pub struct SDJWTHolder {
@@ -26,7 +29,6 @@ pub struct SDJWTHolder {
     serialized_key_binding_jwt: String,
     sd_jwt_payload: Map<String, Value>,
     serialized_sd_jwt: String,
-    sd_jwt_json: Option<SDJWTJson>,
 }
 
 impl SDJWTHolder {
@@ -55,7 +57,6 @@ impl SDJWTHolder {
             serialized_key_binding_jwt: "".to_string(),
             sd_jwt_payload: Map::new(),
             serialized_sd_jwt: "".to_string(),
-            sd_jwt_json: None,
         };
 
         holder
@@ -73,7 +74,6 @@ impl SDJWTHolder {
             .unverified_sd_jwt
             .take()
             .ok_or(Error::InvalidState("Cannot take jwt".to_string()))?;
-        holder.sd_jwt_json = holder.sd_jwt_engine.unverified_sd_jwt_json.clone();
 
         holder.sd_jwt_engine.create_hash_mappings()?;
 
@@ -116,24 +116,48 @@ impl SDJWTHolder {
             }
         }
 
-        let sd_jwt_presentation = if self.sd_jwt_engine.serialization_format == SDJWTSerializationFormat::Compact {
-            let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 2);
-            combined.push(&self.serialized_sd_jwt);
-            combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
-            combined.push(&self.serialized_key_binding_jwt);
-            let joined = combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
-            joined.to_string()
-        } else {
-            let mut sd_jwt_json = self
-                .sd_jwt_json
-                .take()
-                .ok_or(Error::InvalidState("Cannot take SDJWTJson".to_string()))?;
-            sd_jwt_json.header.disclosures = self.hs_disclosures.clone();
-            if !self.serialized_key_binding_jwt.is_empty() {
-                sd_jwt_json.header.kb_jwt = Some(self.serialized_key_binding_jwt.clone());
+        let sd_jwt_presentation = match self.sd_jwt_engine.serialization_format {
+            SDJWTSerializationFormat::Compact => {
+                let mut combined: Vec<&str> = Vec::with_capacity(self.hs_disclosures.len() + 2);
+                combined.push(&self.serialized_sd_jwt);
+                combined.extend(self.hs_disclosures.iter().map(|s| s.as_str()));
+                combined.push(&self.serialized_key_binding_jwt);
+                combined.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             }
-            serde_json::to_string(&sd_jwt_json)
+            SDJWTSerializationFormat::FlattenedJson => {
+                let (protected, payload, signature) =
+                    SDJWTCommon::split_jwt(&self.serialized_sd_jwt)?;
+                let header = SDJWTUnprotectedHeader {
+                    disclosures: self.hs_disclosures.clone(),
+                    kb_jwt: (!self.serialized_key_binding_jwt.is_empty())
+                        .then(|| self.serialized_key_binding_jwt.clone()),
+                };
+                serde_json::to_string(&SDJWTFlattenedJson {
+                    protected,
+                    payload,
+                    signature,
+                    header,
+                })
                 .map_err(|e| Error::DeserializationError(e.to_string()))?
+            }
+            SDJWTSerializationFormat::GeneralJson => {
+                let (protected, payload, signature) =
+                    SDJWTCommon::split_jwt(&self.serialized_sd_jwt)?;
+                let header = SDJWTUnprotectedHeader {
+                    disclosures: self.hs_disclosures.clone(),
+                    kb_jwt: (!self.serialized_key_binding_jwt.is_empty())
+                        .then(|| self.serialized_key_binding_jwt.clone()),
+                };
+                serde_json::to_string(&SDJWTGeneralJson {
+                    payload,
+                    signatures: vec![SDJWTGeneralJsonSignature {
+                        protected,
+                        signature,
+                        header,
+                    }],
+                })
+                .map_err(|e| Error::DeserializationError(e.to_string()))?
+            }
         };
 
         Ok(sd_jwt_presentation)
@@ -299,7 +323,7 @@ impl SDJWTHolder {
         self.key_binding_jwt_header
             .insert("alg".to_string(), alg.clone().into());
         self.key_binding_jwt_header
-            .insert("typ".to_string(), crate::KB_JWT_TYP_HEADER.into());
+            .insert("typ".to_string(), KB_JWT_TYP_HEADER.into());
         self.key_binding_jwt_payload
             .insert("nonce".to_string(), nonce.into());
         self.key_binding_jwt_payload
@@ -316,7 +340,7 @@ impl SDJWTHolder {
             Algorithm::from_str(&alg)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?,
         );
-        header.typ = Some(crate::KB_JWT_TYP_HEADER.into());
+        header.typ = Some(KB_JWT_TYP_HEADER.into());
         self.serialized_key_binding_jwt =
             jsonwebtoken::encode(&header, &self.key_binding_jwt_payload, holder_key)
                 .map_err(|e| Error::DeserializationError(e.to_string()))?;

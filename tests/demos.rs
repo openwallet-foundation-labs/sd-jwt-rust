@@ -12,7 +12,7 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::ClaimsForSelectiveDisclosureStrategy;
-use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat};
+use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTSerializationFormat};
 use sd_jwt_rs::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -303,7 +303,7 @@ fn demo_positive_cases(
         Option<EncodingKey>,
         Option<Jwk>,
     ),
-    #[values(SDJWTSerializationFormat::Compact, SDJWTSerializationFormat::JSON)] format: SDJWTSerializationFormat,
+    #[values(SDJWTSerializationFormat::Compact, SDJWTSerializationFormat::FlattenedJson, SDJWTSerializationFormat::GeneralJson)] format: SDJWTSerializationFormat,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
@@ -331,46 +331,69 @@ fn demo_positive_cases(
         )
         .unwrap();
 
-    if format == SDJWTSerializationFormat::Compact {
-        let mut issued_parts: HashSet<&str> = issued
-            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
-            .collect();
-        issued_parts.remove("");
+    match format {
+        SDJWTSerializationFormat::Compact => {
+            let mut issued_parts: HashSet<&str> = issued
+                .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+                .collect();
+            issued_parts.remove("");
 
-        let mut revealed_parts: HashSet<&str> = presentation
-            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
-            .collect();
-        revealed_parts.remove("");
+            let mut revealed_parts: HashSet<&str> = presentation
+                .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+                .collect();
+            revealed_parts.remove("");
 
-        let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
-        // Compare that number of disclosed parts are equal
-        let mut revealed_parts_number = revealed_parts.len();
-        if holder_jwk.is_some() {
-            // Remove KB
-            revealed_parts_number -= 1;
+            let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
+            // Compare that number of disclosed parts are equal
+            let mut revealed_parts_number = revealed_parts.len();
+            if holder_jwk.is_some() {
+                // Remove KB
+                revealed_parts_number -= 1;
+            }
+            assert_eq!(intersected_parts.len(), revealed_parts_number);
+            // here `+1` means adding issued jwt part also
+            assert_eq!(number_of_revealed_sds + 1, revealed_parts_number);
         }
-        assert_eq!(intersected_parts.len(), revealed_parts_number);
-        // here `+1` means adding issued jwt part also
-        assert_eq!(number_of_revealed_sds + 1, revealed_parts_number);
-    } else {
-        let mut issued: SDJWTJson = serde_json::from_str(&issued).unwrap();
-        let mut revealed: SDJWTJson = serde_json::from_str(&presentation).unwrap();
-        let disclosures: Vec<String> = revealed
-            .header
-            .disclosures
-            .clone()
-            .into_iter()
-            .filter(|d| issued.header.disclosures.contains(d))
-            .collect();
-        assert_eq!(number_of_revealed_sds, disclosures.len());
+        SDJWTSerializationFormat::GeneralJson => {
+            let mut issued: SDJWTGeneralJson = serde_json::from_str(&issued).unwrap();
+            let mut revealed: SDJWTGeneralJson = serde_json::from_str(&presentation).unwrap();
+            let disclosures: Vec<String> = revealed.signatures[0]
+                .header
+                .disclosures
+                .clone()
+                .into_iter()
+                .filter(|d| issued.signatures[0].header.disclosures.contains(d))
+                .collect();
+            assert_eq!(number_of_revealed_sds, disclosures.len());
 
-        if holder_jwk.is_some() {
-            assert!(revealed.header.kb_jwt.is_some());
+            if holder_jwk.is_some() {
+                assert!(revealed.signatures[0].header.kb_jwt.is_some());
+            }
+
+            issued.signatures[0].header.disclosures = disclosures;
+            revealed.signatures[0].header.kb_jwt = None;
+            assert_eq!(revealed, issued);
         }
+        SDJWTSerializationFormat::FlattenedJson => {
+            let mut issued: SDJWTFlattenedJson = serde_json::from_str(&issued).unwrap();
+            let mut revealed: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
+            let disclosures: Vec<String> = revealed
+                .header
+                .disclosures
+                .clone()
+                .into_iter()
+                .filter(|d| issued.header.disclosures.contains(d))
+                .collect();
+            assert_eq!(number_of_revealed_sds, disclosures.len());
 
-        issued.header.disclosures = disclosures;
-        revealed.header.kb_jwt = None;
-        assert_eq!(revealed, issued);
+            if holder_jwk.is_some() {
+                assert!(revealed.header.kb_jwt.is_some());
+            }
+
+            issued.header.disclosures = disclosures;
+            revealed.header.kb_jwt = None;
+            assert_eq!(revealed, issued);
+        }
     }
 
     // Verify presentation
