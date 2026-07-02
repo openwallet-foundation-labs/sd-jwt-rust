@@ -211,6 +211,11 @@ impl SDJWTCommon {
     fn parse_general_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
         let parsed: SDJWTGeneralJson = serde_json::from_str(&sd_jwt_with_disclosures)
             .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        if parsed.signatures.len() > 1 {
+            return Err(Error::InvalidInput(
+                "General JSON SD-JWT with multiple signatures is not supported yet".to_string(),
+            ));
+        }
         // RFC 9901 §8.3: in General JSON Serialization, the Disclosures and the
         // optional KB-JWT live in the first signature's unprotected header.
         let signature = parsed

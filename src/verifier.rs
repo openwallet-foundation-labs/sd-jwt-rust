@@ -987,6 +987,49 @@ mod tests {
     }
 
     #[test]
+    fn reject_general_json_with_multiple_signatures() {
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+        });
+
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::GeneralJson,
+            )
+            .unwrap();
+
+        let mut json: SDJWTGeneralJson = serde_json::from_str(&sd_jwt).unwrap();
+        let duplicated = json.signatures[0].clone();
+        json.signatures.push(duplicated);
+        let tampered = serde_json::to_string(&json).unwrap();
+
+        let result = SDJWTVerifier::new(
+            tampered,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            None,
+            None,
+            SDJWTSerializationFormat::GeneralJson,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted a General JSON SD-JWT with multiple signatures",
+        );
+    }
+
+    #[test]
     fn reject_kb_jwt_missing_iat_claim() {
         let user_claims = json!({
             "address": {
