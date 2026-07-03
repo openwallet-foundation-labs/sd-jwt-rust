@@ -2,7 +2,9 @@
 // https://www.dsr-corporation.com
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{error, SDJWTJson};
+use crate::{
+    error, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTGeneralJsonSignature, SDJWTUnprotectedHeader,
+};
 use error::Result;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
@@ -334,28 +336,44 @@ impl SDJWTIssuer {
                     COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
                 );
             },
-            SDJWTSerializationFormat::JSON => {
-                let jwt: Vec<&str> = self.signed_sd_jwt.split('.').collect();
-                if jwt.len() != 3 {
-                    return Err(Error::InvalidInput(format!(
-                        "Invalid JWT, JWT must contain three parts after splitting with \".\": jwt {}",
-                        self.signed_sd_jwt
-                    )));
-                }
-                let sd_jwt_json = SDJWTJson {
-                    protected: jwt[0].to_owned(),
-                    payload: jwt[1].to_owned(),
-                    signature: jwt[2].to_owned(),
-                    header: crate::SDJWTUnprotectedHeader {
-                        kb_jwt: None,
-                        disclosures: self
-                            .all_disclosures
-                            .iter()
-                            .map(|d| d.raw_b64.to_string())
-                            .collect(),
-                    },
+            SDJWTSerializationFormat::FlattenedJson => {
+                let (protected, payload, signature) = SDJWTCommon::split_jwt(&self.signed_sd_jwt)?;
+                let header = SDJWTUnprotectedHeader {
+                    kb_jwt: None,
+                    disclosures: self
+                        .all_disclosures
+                        .iter()
+                        .map(|d| d.raw_b64.to_string())
+                        .collect(),
                 };
-                self.serialized_sd_jwt = serde_json::to_string(&sd_jwt_json)
+                let flattened_json = SDJWTFlattenedJson {
+                    protected,
+                    payload,
+                    signature,
+                    header,
+                };
+                self.serialized_sd_jwt = serde_json::to_string(&flattened_json)
+                    .map_err(|e| Error::DeserializationError(e.to_string()))?;
+            }
+            SDJWTSerializationFormat::GeneralJson => {
+                let (protected, payload, signature) = SDJWTCommon::split_jwt(&self.signed_sd_jwt)?;
+                let header = SDJWTUnprotectedHeader {
+                    kb_jwt: None,
+                    disclosures: self
+                        .all_disclosures
+                        .iter()
+                        .map(|d| d.raw_b64.to_string())
+                        .collect(),
+                };
+                let general_json = SDJWTGeneralJson {
+                    payload,
+                    signatures: vec![SDJWTGeneralJsonSignature {
+                        protected,
+                        signature,
+                        header,
+                    }],
+                };
+                self.serialized_sd_jwt = serde_json::to_string(&general_json)
                     .map_err(|e| Error::DeserializationError(e.to_string()))?;
             }
         }

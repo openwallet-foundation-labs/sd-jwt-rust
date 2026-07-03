@@ -433,8 +433,9 @@ impl SDJWTVerifier {
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::utils::{base64url_decode, base64url_encode};
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTJson, SDJWTVerifier, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
+    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTVerifier, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
+    use rstest::rstest;
     use serde_json::{json, Map, Value};
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
@@ -770,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_full_presentation_to_allow_other_algorithms_json_format() {
+    fn verify_full_presentation_to_allow_other_algorithms() {
 
         let user_claims = json!({
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
@@ -791,11 +792,11 @@ mod tests {
             ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
             false,
-            SDJWTSerializationFormat::JSON, // Changed to Json format
+            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         )
             .unwrap();
        
-        let presentation = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::JSON) // Changed to Json format
+        let presentation = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::FlattenedJson) // Changed to Flattened Json format
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
@@ -814,7 +815,7 @@ mod tests {
             }),
             None,
             None,
-            SDJWTSerializationFormat::JSON, // Changed to Json format
+            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         )
             .unwrap()
             .verified_claims;
@@ -847,7 +848,7 @@ mod tests {
             ClaimsForSelectiveDisclosureStrategy::AllLevels,
             Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
             false,
-            SDJWTSerializationFormat::JSON, // Changed to Json format
+            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         ).unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
@@ -856,7 +857,7 @@ mod tests {
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let mut holder = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::JSON).unwrap(); // Changed to Json format
+        let mut holder = SDJWTHolder::new(sd_jwt.clone(), SDJWTSerializationFormat::FlattenedJson).unwrap(); // Changed to Flattened Json format
         let presentation = holder.create_presentation(
                 user_claims.as_object().unwrap().clone(),
                 nonce.clone(),
@@ -873,7 +874,7 @@ mod tests {
             }),
             aud.clone(),
             nonce.clone(),
-            SDJWTSerializationFormat::JSON, // Changed to Json format
+            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         )
             .unwrap()
             .verified_claims;
@@ -892,8 +893,13 @@ mod tests {
         assert_eq!(claims_to_check, verified_claims);
     }
 
-    #[test]
-    fn reject_tampered_json_presentation_with_injected_disclosure() {
+    #[rstest]
+    #[case::flattened(SDJWTSerializationFormat::FlattenedJson)]
+    #[case::general(SDJWTSerializationFormat::GeneralJson)]
+    #[case::compact(SDJWTSerializationFormat::Compact)]
+    fn reject_tampered_presentation_with_injected_disclosure(
+        #[case] format: SDJWTSerializationFormat,
+    ) {
         let user_claims = json!({
             "address": {
                 "street_address": "Schulstr. 12",
@@ -915,7 +921,7 @@ mod tests {
             ClaimsForSelectiveDisclosureStrategy::AllLevels,
             Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
             false,
-            SDJWTSerializationFormat::JSON,
+            format.clone(),
         ).unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
@@ -923,7 +929,7 @@ mod tests {
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::JSON)
+        let presentation = SDJWTHolder::new(sd_jwt, format.clone())
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
@@ -934,15 +940,34 @@ mod tests {
             )
             .unwrap();
 
-        // Tamper: inject a syntactically-valid extra disclosure into the JSON
-        // presentation. The KB-JWT's sd_hash was computed by the holder over
-        // the original disclosure list, so the verifier MUST detect the
-        // mismatch on the augmented presentation.
-        let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
+        // Tamper: inject a syntactically-valid extra disclosure into the presentation.
+        // The KB-JWT's sd_hash was computed by the holder over the original disclosure
+        // list, so the verifier MUST detect the mismatch. Where the disclosure goes
+        // differs by format: a `~`-separated segment before the KB-JWT (Compact §4),
+        // a top-level `header` member (Flattened §8.2), or the first signature's
+        // header (General §8.3).
         let injected_disclosure =
             base64url_encode(br#"["injectedsalt", "injected_claim", "value"]"#);
-        json.header.disclosures.push(injected_disclosure);
-        let tampered = serde_json::to_string(&json).unwrap();
+        let tampered = match format {
+            SDJWTSerializationFormat::FlattenedJson => {
+                let mut json: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
+                json.header.disclosures.push(injected_disclosure);
+                serde_json::to_string(&json).unwrap()
+            }
+            SDJWTSerializationFormat::GeneralJson => {
+                let mut json: SDJWTGeneralJson = serde_json::from_str(&presentation).unwrap();
+                json.signatures[0].header.disclosures.push(injected_disclosure);
+                serde_json::to_string(&json).unwrap()
+            }
+            SDJWTSerializationFormat::Compact => {
+                // presentation = "<jwt>~<disclosures…>~<kb_jwt>"; splice the extra
+                // disclosure in just before the trailing KB-JWT segment.
+                let mut parts: Vec<&str> =
+                    presentation.split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR).collect();
+                parts.insert(parts.len() - 1, &injected_disclosure);
+                parts.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            }
+        };
 
         let result = SDJWTVerifier::new(
             tampered,
@@ -952,12 +977,55 @@ mod tests {
             }),
             aud,
             nonce,
-            SDJWTSerializationFormat::JSON,
+            format.clone(),
         );
 
         assert!(
             result.is_err(),
-            "Verifier accepted JSON presentation with tampered disclosure list",
+            "Verifier accepted {format:?} presentation with tampered disclosure list",
+        );
+    }
+
+    #[test]
+    fn reject_general_json_with_multiple_signatures() {
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+        });
+
+        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
+        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
+
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::GeneralJson,
+            )
+            .unwrap();
+
+        let mut json: SDJWTGeneralJson = serde_json::from_str(&sd_jwt).unwrap();
+        let duplicated = json.signatures[0].clone();
+        json.signatures.push(duplicated);
+        let tampered = serde_json::to_string(&json).unwrap();
+
+        let result = SDJWTVerifier::new(
+            tampered,
+            Box::new(|_, _| {
+                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
+                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
+            }),
+            None,
+            None,
+            SDJWTSerializationFormat::GeneralJson,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted a General JSON SD-JWT with multiple signatures",
         );
     }
 
@@ -983,7 +1051,7 @@ mod tests {
             ClaimsForSelectiveDisclosureStrategy::AllLevels,
             Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
             false,
-            SDJWTSerializationFormat::JSON,
+            SDJWTSerializationFormat::FlattenedJson,
         ).unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
@@ -991,7 +1059,7 @@ mod tests {
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::JSON)
+        let presentation = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::FlattenedJson)
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
@@ -1006,7 +1074,7 @@ mod tests {
         // payload. The KB-JWT remains validly signed by the holder key, so
         // signature verification will pass — but the spec requires `iat` to
         // be present, and the verifier must reject this presentation.
-        let mut json: SDJWTJson = serde_json::from_str(&presentation).unwrap();
+        let mut json: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
         let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
         let kb_parts: Vec<&str> = original_kb_jwt.split('.').collect();
         let payload_bytes = base64url_decode(kb_parts[1]).unwrap();
@@ -1032,7 +1100,7 @@ mod tests {
             }),
             aud,
             nonce,
-            SDJWTSerializationFormat::JSON,
+            SDJWTSerializationFormat::FlattenedJson,
         );
 
         assert!(

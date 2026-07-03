@@ -41,9 +41,11 @@ impl SDJWTHasSDClaimException {}
 /// SDJWTSerializationFormat is used to determine how an SD-JWT is serialized to String
 #[derive(Default, Clone, PartialEq, Debug, Display)]
 pub enum SDJWTSerializationFormat {
-    /// JSON-encoded representation
+    /// Flattened JWS JSON representation
     #[default]
-    JSON,
+    FlattenedJson,
+    /// General JWS JSON representation
+    GeneralJson,
     /// Base64-encoded representation
     Compact,
 }
@@ -54,7 +56,6 @@ pub(crate) struct SDJWTCommon {
     serialization_format: SDJWTSerializationFormat,
     unverified_input_key_binding_jwt: Option<String>,
     unverified_sd_jwt: Option<String>,
-    unverified_sd_jwt_json: Option<SDJWTJson>,
     unverified_input_sd_jwt_payload: Option<Map<String, Value>>,
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
@@ -63,9 +64,22 @@ pub(crate) struct SDJWTCommon {
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
-pub struct SDJWTJson {
+pub struct SDJWTFlattenedJson {
     protected: String,
     payload: String,
+    signature: String,
+    pub header: SDJWTUnprotectedHeader,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+pub struct SDJWTGeneralJson {
+    payload: String,
+    pub signatures: Vec<SDJWTGeneralJsonSignature>,
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+pub struct SDJWTGeneralJsonSignature {
+    protected: String,
     signature: String,
     pub header: SDJWTUnprotectedHeader,
 }
@@ -176,22 +190,50 @@ impl SDJWTCommon {
         Ok(())
     }
 
-    fn parse_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
-        let parsed_sd_jwt_json: SDJWTJson = serde_json::from_str(&sd_jwt_with_disclosures)
+    fn parse_flattened_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
+        let parsed: SDJWTFlattenedJson = serde_json::from_str(&sd_jwt_with_disclosures)
             .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        self.unverified_sd_jwt_json = Some(parsed_sd_jwt_json.clone());
-        self.unverified_input_key_binding_jwt = parsed_sd_jwt_json.header.kb_jwt;
-        self.input_disclosures = parsed_sd_jwt_json.header.disclosures;
+        self.unverified_input_key_binding_jwt = parsed.header.kb_jwt;
+        self.input_disclosures = parsed.header.disclosures;
         self.unverified_input_sd_jwt_payload =
-            Some(jwt_payload_decode(&parsed_sd_jwt_json.payload)?);
+            Some(jwt_payload_decode(&parsed.payload)?);
         let sd_jwt = format!(
             "{}.{}.{}",
-            parsed_sd_jwt_json.protected,
-            parsed_sd_jwt_json.payload,
-            parsed_sd_jwt_json.signature
+            parsed.protected,
+            parsed.payload,
+            parsed.signature
         );    
         self.unverified_sd_jwt = Some(sd_jwt.clone());
         self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);    
+        Ok(())
+    }
+
+    fn parse_general_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
+        let parsed: SDJWTGeneralJson = serde_json::from_str(&sd_jwt_with_disclosures)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        if parsed.signatures.len() > 1 {
+            return Err(Error::InvalidInput(
+                "General JSON SD-JWT with multiple signatures is not supported yet".to_string(),
+            ));
+        }
+        // RFC 9901 §8.3: in General JSON Serialization, the Disclosures and the
+        // optional KB-JWT live in the first signature's unprotected header.
+        let signature = parsed
+            .signatures
+            .into_iter()
+            .next()
+            .ok_or(Error::InvalidInput(
+                "General JSON SD-JWT must contain at least one signature".to_string(),
+            ))?;
+        self.unverified_input_key_binding_jwt = signature.header.kb_jwt;
+        self.input_disclosures = signature.header.disclosures;
+        self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(&parsed.payload)?);
+        let sd_jwt = format!(
+            "{}.{}.{}",
+            signature.protected, parsed.payload, signature.signature
+        );
+        self.unverified_sd_jwt = Some(sd_jwt.clone());
+        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);
         Ok(())
     }
 
@@ -200,8 +242,11 @@ impl SDJWTCommon {
             SDJWTSerializationFormat::Compact => {
                 self.parse_compact_sd_jwt(sd_jwt_with_disclosures)
             }
-            SDJWTSerializationFormat::JSON => {
-                self.parse_json_sd_jwt(sd_jwt_with_disclosures)
+            SDJWTSerializationFormat::FlattenedJson => {
+                self.parse_flattened_json_sd_jwt(sd_jwt_with_disclosures)
+            }
+            SDJWTSerializationFormat::GeneralJson => {
+                self.parse_general_json_sd_jwt(sd_jwt_with_disclosures)
             }
         }
     }
@@ -223,6 +268,17 @@ impl SDJWTCommon {
             .and_then(Value::as_str)
             .map(String::from);
         sign_alg
+    }
+
+    /// Splits a signed JWT (`protected.payload.signature`) into its three parts.
+    fn split_jwt(jwt: &str) -> Result<(String, String, String)> {
+        let parts: Vec<&str> = jwt.split('.').collect();
+        let [protected, payload, signature] = parts.as_slice() else {
+            return Err(Error::InvalidState(format!(
+                "Invalid signed JWT, expected three parts: {jwt}"
+            )));
+        };
+        Ok((protected.to_string(), payload.to_string(), signature.to_string()))
     }
 }
 
@@ -248,15 +304,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_json_sd_jwt() {
+    fn test_parse_flattened_json_sd_jwt() {
         let mut sdjwt = SDJWTCommon::default();
         let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
-        sdjwt.parse_json_sd_jwt(format!(
-            "{{\"protected\":\"jwt1\",\"payload\":\"{encoded_empty_object}\",\"signature\":\"jwt3\",\"header\":{{\"disclosures\":[\"disc1\",\"disc2\"],\"kb_jwt\":\"kbjwt\"}}}}"
+        sdjwt.parse_flattened_json_sd_jwt(format!(
+            r#"{{"protected":"jwt1","payload":"{encoded_empty_object}","signature":"jwt3","header":{{"disclosures":["disc1","disc2"],"kb_jwt":"kbjwt"}}}}"#
         )).unwrap();
         assert_eq!(sdjwt.unverified_sd_jwt.unwrap(), format!("jwt1.{encoded_empty_object}.jwt3"));
         assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
         assert_eq!(sdjwt.input_disclosures, vec!["disc1".to_string(), "disc2".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_general_json_rejects_empty_signatures() {
+        // `signatures` is a Vec, so serde accepts `[]`; the parser must reject a
+        // signature-less input explicitly rather than panic on `signatures[0]`.
+        let mut sdjwt = SDJWTCommon::default();
+        let err = sdjwt
+            .parse_general_json_sd_jwt(r#"{"payload":"e30","signatures":[]}"#.to_string())
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("at least one signature"),
+            "empty `signatures` array should be rejected: {err}"
+        );
     }
 
     #[test]
