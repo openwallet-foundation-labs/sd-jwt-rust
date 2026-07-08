@@ -381,10 +381,22 @@ impl SDJWTVerifier {
                         .ok_or(Error::InvalidArrayDisclosureObject(
                             value_for_digest.to_string(),
                         ))?;
+                if disclosure.len() != 3 {
+                    return Err(Error::InvalidDisclosure(format!(
+                        "Object-property Disclosure must be a 3-element array [salt, name, value]: {}",
+                        value_for_digest
+                    )));
+                }
                 let key = disclosure[1]
                     .as_str()
                     .ok_or(Error::ConversionError("str".to_string()))?
                     .to_owned();
+                if key == SD_DIGESTS_KEY || key == SD_LIST_PREFIX {
+                    return Err(Error::InvalidDisclosure(format!(
+                        "Disclosure claim name must not be `_sd` or `...`: {}",
+                        key
+                    )));
+                }
                 let value = disclosure[2].clone();
                 if pre_output.contains_key(&key) {
                     return Err(Error::DuplicateKeyError(key.to_string()));
@@ -420,6 +432,12 @@ impl SDJWTVerifier {
                     .ok_or(Error::InvalidArrayDisclosureObject(
                         value_for_digest.to_string(),
                     ))?;
+            if disclosure.len() != 2 {
+                return Err(Error::InvalidArrayDisclosureObject(format!(
+                    "Array-element Disclosure must be a 2-element array [salt, value]: {}",
+                    value_for_digest
+                )));
+            }
 
             let value = disclosure[1].clone();
             let unpacked_value = self.unpack_disclosed_claims(&value)?;
@@ -1277,6 +1295,41 @@ mod tests {
     }
 
     #[test]
+    fn reject_disclosure_with_reserved_claim_name() {
+        use crate::utils::base64_hash;
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        for reserved in ["_sd", "..."] {
+            // A well-formed (3-element) Disclosure that discloses a claim named
+            // `_sd` or `...`; §7.1 requires the Verifier to reject it.
+            let disclosure =
+                base64url_encode(format!(r#"["salt", "{reserved}", "value"]"#).as_bytes());
+            let digest = base64_hash(disclosure.as_bytes());
+            let payload = json!({
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "_sd": [digest],
+                "_sd_alg": "sha-256",
+            });
+            let signed =
+                jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key)
+                    .unwrap();
+            let sd_jwt = format!("{signed}~{disclosure}~");
+
+            let result = SDJWTVerifier::new(
+                sd_jwt,
+                Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+                None,
+                None,
+                SDJWTSerializationFormat::Compact,
+            );
+            assert!(
+                result.is_err(),
+                "verifier accepted a Disclosure with reserved claim name `{reserved}`",
+            );
+        }
+    }
+
+    #[test]
     fn reject_presentation_with_expired_exp() {
         let user_claims = json!({
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
@@ -1310,5 +1363,69 @@ mod tests {
                 "expected an expiry failure, got: {err}"
             ),
         }
+    }
+
+    #[test]
+    fn reject_object_property_disclosure_with_wrong_element_count() {
+        use crate::utils::base64_hash;
+        // A conforming object-property Disclosure is a 3-element array
+        // [salt, claim name, claim value]. Craft a malformed 2-element one
+        // and reference its digest from the signed `_sd` array.
+        let malformed = base64url_encode(br#"["salt", "valuewithoutname"]"#);
+        let digest = base64_hash(malformed.as_bytes());
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "_sd": [digest],
+            "_sd_alg": "sha-256",
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~{malformed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_err(),
+            "verifier accepted a malformed (non-3-element) object-property Disclosure",
+        );
+    }
+
+    #[test]
+    fn reject_array_element_disclosure_with_wrong_element_count() {
+        use crate::utils::base64_hash;
+        // A conforming array-element Disclosure is a 2-element array
+        // [salt, value]. Craft a malformed 3-element one and reference it
+        // via {"...": digest}.
+        let malformed = base64url_encode(br#"["salt", "claimname", "value"]"#);
+        let digest = base64_hash(malformed.as_bytes());
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "arr": [ { "...": digest } ],
+            "_sd_alg": "sha-256",
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~{malformed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_err(),
+            "verifier accepted a malformed (non-2-element) array-element Disclosure",
+        );
     }
 }

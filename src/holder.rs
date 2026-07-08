@@ -63,6 +63,17 @@ impl SDJWTHolder {
             .sd_jwt_engine
             .parse_sd_jwt(sd_jwt_with_disclosures.clone())?;
 
+        if holder
+            .sd_jwt_engine
+            .unverified_input_key_binding_jwt
+            .is_some()
+        {
+            return Err(Error::InvalidInput(
+                "Holder received an SD-JWT+KB; a Key Binding JWT must not be present"
+                    .to_string(),
+            ));
+        }
+
         //TODO Verify signature before accepting the JWT
         holder.sd_jwt_payload = holder
             .sd_jwt_engine
@@ -372,6 +383,38 @@ mod tests {
     use std::collections::HashSet;
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
+
+    #[test]
+    fn new_rejects_sd_jwt_with_key_binding() {
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "exp": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        // An issued SD-JWT ends with a trailing `~` and carries no Key Binding
+        // JWT. Append a (dummy) Key Binding JWT segment to make it an SD-JWT+KB.
+        assert!(sd_jwt.ends_with(COMBINED_SERIALIZATION_FORMAT_SEPARATOR));
+        let sd_jwt_kb = format!("{sd_jwt}fakekbjwt");
+
+        let result = SDJWTHolder::new(sd_jwt_kb, SDJWTSerializationFormat::Compact);
+        assert!(
+            result.is_err(),
+            "Holder accepted an SD-JWT that already carried a Key Binding JWT",
+        );
+    }
 
     #[test]
     fn create_full_presentation() {
