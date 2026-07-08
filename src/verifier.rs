@@ -388,6 +388,12 @@ impl SDJWTVerifier {
                     .as_str()
                     .ok_or(Error::ConversionError("str".to_string()))?
                     .to_owned();
+                if key == SD_DIGESTS_KEY || key == SD_LIST_PREFIX {
+                    return Err(Error::InvalidDisclosure(format!(
+                        "Disclosure claim name must not be `_sd` or `...`: {}",
+                        key
+                    )));
+                }
                 let value = disclosure[2].clone();
                 if pre_output.contains_key(&key) {
                     return Err(Error::DuplicateKeyError(key.to_string()));
@@ -1228,6 +1234,41 @@ mod tests {
             SDJWTSerializationFormat::Compact,
         );
         assert!(result.is_ok(), "verifier rejected `exp`-less SD-JWT");
+    }
+
+    #[test]
+    fn reject_disclosure_with_reserved_claim_name() {
+        use crate::utils::base64_hash;
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        for reserved in ["_sd", "..."] {
+            // A well-formed (3-element) Disclosure that discloses a claim named
+            // `_sd` or `...`; §7.1 requires the Verifier to reject it.
+            let disclosure =
+                base64url_encode(format!(r#"["salt", "{reserved}", "value"]"#).as_bytes());
+            let digest = base64_hash(disclosure.as_bytes());
+            let payload = json!({
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "_sd": [digest],
+                "_sd_alg": "sha-256",
+            });
+            let signed =
+                jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key)
+                    .unwrap();
+            let sd_jwt = format!("{signed}~{disclosure}~");
+
+            let result = SDJWTVerifier::new(
+                sd_jwt,
+                Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+                None,
+                None,
+                SDJWTSerializationFormat::Compact,
+            );
+            assert!(
+                result.is_err(),
+                "verifier accepted a Disclosure with reserved claim name `{reserved}`",
+            );
+        }
     }
 
     #[test]
