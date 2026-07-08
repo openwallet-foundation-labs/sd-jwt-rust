@@ -378,6 +378,12 @@ impl SDJWTVerifier {
                         .ok_or(Error::InvalidArrayDisclosureObject(
                             value_for_digest.to_string(),
                         ))?;
+                if disclosure.len() != 3 {
+                    return Err(Error::InvalidDisclosure(format!(
+                        "Object-property Disclosure must be a 3-element array [salt, name, value]: {}",
+                        value_for_digest
+                    )));
+                }
                 let key = disclosure[1]
                     .as_str()
                     .ok_or(Error::ConversionError("str".to_string()))?
@@ -423,6 +429,12 @@ impl SDJWTVerifier {
                     .ok_or(Error::InvalidArrayDisclosureObject(
                         value_for_digest.to_string(),
                     ))?;
+            if disclosure.len() != 2 {
+                return Err(Error::InvalidArrayDisclosureObject(format!(
+                    "Array-element Disclosure must be a 2-element array [salt, value]: {}",
+                    value_for_digest
+                )));
+            }
 
             let value = disclosure[1].clone();
             let unpacked_value = self.unpack_disclosed_claims(&value)?;
@@ -1293,5 +1305,69 @@ mod tests {
                 "expected an expiry failure, got: {err}"
             ),
         }
+    }
+
+    #[test]
+    fn reject_object_property_disclosure_with_wrong_element_count() {
+        use crate::utils::base64_hash;
+        // A conforming object-property Disclosure is a 3-element array
+        // [salt, claim name, claim value]. Craft a malformed 2-element one
+        // and reference its digest from the signed `_sd` array.
+        let malformed = base64url_encode(br#"["salt", "valuewithoutname"]"#);
+        let digest = base64_hash(malformed.as_bytes());
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "_sd": [digest],
+            "_sd_alg": "sha-256",
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~{malformed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_err(),
+            "verifier accepted a malformed (non-3-element) object-property Disclosure",
+        );
+    }
+
+    #[test]
+    fn reject_array_element_disclosure_with_wrong_element_count() {
+        use crate::utils::base64_hash;
+        // A conforming array-element Disclosure is a 2-element array
+        // [salt, value]. Craft a malformed 3-element one and reference it
+        // via {"...": digest}.
+        let malformed = base64url_encode(br#"["salt", "claimname", "value"]"#);
+        let digest = base64_hash(malformed.as_bytes());
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "arr": [ { "...": digest } ],
+            "_sd_alg": "sha-256",
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~{malformed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_err(),
+            "verifier accepted a malformed (non-2-element) array-element Disclosure",
+        );
     }
 }
