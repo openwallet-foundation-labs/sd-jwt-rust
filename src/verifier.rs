@@ -120,6 +120,9 @@ impl SDJWTVerifier {
         // RFC 9901 §4.1: `exp` is not mandated, so don't require it. `validate_exp`
         // stays true, so a present `exp` is still checked for expiry.
         validation.required_spec_claims.remove("exp");
+        // `nbf` is optional too (not added to required_spec_claims), but when
+        // present it must be honored; jsonwebtoken leaves `validate_nbf` off.
+        validation.validate_nbf = true;
         let claims = jsonwebtoken::decode(
             sd_jwt,
             &issuer_public_key,
@@ -1125,6 +1128,61 @@ mod tests {
             result.is_err(),
             "Verifier accepted KB-JWT presentation missing required `iat` claim",
         );
+    }
+
+    #[test]
+    fn reject_sd_jwt_with_future_nbf() {
+        // An SD-JWT whose `nbf` is in the future is not yet valid.
+        let payload = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "nbf": 1883000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted a presentation with a future `nbf`"),
+            Err(err) => assert!(
+                err.to_string().contains("ImmatureSignature"),
+                "expected an immature-signature failure, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn verify_presentation_with_past_nbf() {
+        // A present `nbf` already in the past must not block verification.
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "nbf": 1683000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
+                .unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            sd_jwt,
+            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(result.is_ok(), "verifier rejected an SD-JWT with a past `nbf`");
     }
 
     #[test]
