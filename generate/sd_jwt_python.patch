@@ -1,54 +1,68 @@
 diff --git a/.gitignore b/.gitignore
-index 1874e26..72ff453 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -157,7 +157,7 @@ cython_debug/
+--- a/.gitignore	(revision cde613902c4e23ae7160aa30966a6a5e7c658535)
++++ b/.gitignore	(date 1763516074509)
+@@ -157,7 +157,7 @@
  #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
  #  and can be added to the global gitignore or merged into this file.  For a more nuclear
  #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 -#.idea/
 +.idea/
- 
- 
+
+
  # Ignore output of test cases except for specification.yml
 diff --git a/pyproject.toml b/pyproject.toml
-index 4294e64..47c9281 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -12,7 +12,7 @@ jwcrypto = ">=1.3.1"
+--- a/pyproject.toml	(revision cde613902c4e23ae7160aa30966a6a5e7c658535)
++++ b/pyproject.toml	(date 1763516010214)
+@@ -7,12 +7,12 @@
+ packages = [{include = "sd_jwt", from = "src"}]
+
+ [tool.poetry.dependencies]
+-python = "^3.8"
++python = "^3.8.1"
+ jwcrypto = ">=1.3.1"
  pyyaml = ">=5.4"
- 
+
  [tool.poetry.group.dev.dependencies]
 -flake8 = "^6.0.0"
 +# flake8 = "^6.0.0"
  black = "^23.3.0"
- 
+
  [build-system]
 diff --git a/src/sd_jwt/bin/generate.py b/src/sd_jwt/bin/generate.py
-index ad00641..d0299ea 100755
---- a/src/sd_jwt/bin/generate.py
-+++ b/src/sd_jwt/bin/generate.py
-@@ -105,12 +105,36 @@ def generate_test_case_data(settings: Dict, testcase_path: Path, type: str):
- 
+--- a/src/sd_jwt/bin/generate.py	(revision cde613902c4e23ae7160aa30966a6a5e7c658535)
++++ b/src/sd_jwt/bin/generate.py	(date 1763735464492)
+@@ -12,6 +12,8 @@
+ from typing import Dict
+ from pathlib import Path
+
++from jwcrypto.jwk import JWK, JWKSet
++
+ from sd_jwt import __version__
+ from sd_jwt.holder import SDJWTHolder
+ from sd_jwt.issuer import SDJWTIssuer
+@@ -112,11 +114,37 @@
+
      # Write the test case data to the directory of the test case
- 
+
 +    claims_vs_salts = []
 +    for disclosure in sdjwt_at_issuer.ii_disclosures:
 +        claims_vs_salts.append(disclosure.salt)
++
++    demo_issuer_key: JWK = demo_keys["issuer_keys"].pop()
 +
      _artifacts = {
          "user_claims": (
              remove_sdobj_wrappers(testcase["user_claims"]),
              "User Claims",
              "json",
-         ),
++        ),
 +        "issuer_key": (
-+            demo_keys["issuer_key"].export_to_pem(True, None).decode("utf-8"),
++            demo_issuer_key.export_to_pem(True, None).decode("utf-8"),
 +            "Issuer private key",
 +            "pem",
 +        ),
 +        "issuer_public_key": (
-+            demo_keys["issuer_public_key"].export_to_pem(False, None).decode("utf-8"),
++            demo_issuer_key.public().export_to_pem(False, None).decode("utf-8"),
 +            "Issuer public key",
 +            "pem",
 +        ),
@@ -61,17 +75,15 @@ index ad00641..d0299ea 100755
 +            claims_vs_salts,
 +            "Claims with Salts",
 +            "json",
-+        ),
+         ),
          "sd_jwt_payload": (
              sdjwt_at_issuer.sd_jwt_payload,
-             "Payload of the SD-JWT",
 diff --git a/src/sd_jwt/disclosure.py b/src/sd_jwt/disclosure.py
-index a9727c4..d1f983a 100644
---- a/src/sd_jwt/disclosure.py
-+++ b/src/sd_jwt/disclosure.py
-@@ -15,11 +15,11 @@ class SDJWTDisclosure:
+--- a/src/sd_jwt/disclosure.py	(revision cde613902c4e23ae7160aa30966a6a5e7c658535)
++++ b/src/sd_jwt/disclosure.py	(date 1763516309307)
+@@ -15,11 +15,11 @@
          self._hash()
- 
+
      def _hash(self):
 -        salt = self.issuer._generate_salt()
 +        self._salt = self.issuer._generate_salt()
@@ -81,13 +93,13 @@ index a9727c4..d1f983a 100644
          else:
 -            data = [salt, self.key, self.value]
 +            data = [self._salt, self.key, self.value]
- 
+
          self._json = dumps(data).encode("utf-8")
- 
-@@ -30,6 +30,10 @@ class SDJWTDisclosure:
+
+@@ -30,6 +30,10 @@
      def hash(self):
          return self._hash
- 
+
 +    @property
 +    def salt(self):
 +        return self._salt
