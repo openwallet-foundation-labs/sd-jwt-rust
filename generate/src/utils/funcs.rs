@@ -5,11 +5,36 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use serde::Deserialize;
 use serde_json::Value;
 use sd_jwt_rs::SDJWTSerializationFormat;
 use sd_jwt_rs::utils::{base64_hash, base64url_decode};
 use sd_jwt_rs::utils::SALTS;
 use crate::error::{Error, ErrorKind, Result};
+
+// Local mirrors of the lib's JWS JSON serialization structs (SDJWTFlattenedJson /
+// SDJWTGeneralJson); the lib's `payload` field is private, so they cannot be reused here.
+#[derive(Deserialize)]
+struct FlattenedJsonSdJwt {
+    payload: String,
+    header: UnprotectedHeader,
+}
+
+#[derive(Deserialize)]
+struct GeneralJsonSdJwt {
+    payload: String,
+    signatures: Vec<GeneralJsonSignature>,
+}
+
+#[derive(Deserialize)]
+struct GeneralJsonSignature {
+    header: UnprotectedHeader,
+}
+
+#[derive(Deserialize)]
+struct UnprotectedHeader {
+    disclosures: Vec<String>,
+}
 
 
 pub fn parse_sdjwt_paylod(
@@ -19,8 +44,11 @@ pub fn parse_sdjwt_paylod(
 ) -> Result<Value> {
 
     match serialization_format {
-        SDJWTSerializationFormat::JSON => {
-            parse_payload_json(sd_jwt, remove_decoy)
+        SDJWTSerializationFormat::FlattenedJson => {
+            parse_payload_flattened_json(sd_jwt, remove_decoy)
+        },
+        SDJWTSerializationFormat::GeneralJson => {
+            parse_payload_general_json(sd_jwt, remove_decoy)
         },
         SDJWTSerializationFormat::Compact => {
             parse_payload_compact(sd_jwt, remove_decoy)
@@ -28,22 +56,35 @@ pub fn parse_sdjwt_paylod(
     }
 }
 
-fn parse_payload_json(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
-    let v: serde_json::Value = serde_json::from_str(sd_jwt).unwrap();
+fn parse_payload_flattened_json(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
+    let parsed: FlattenedJsonSdJwt = serde_json::from_str(sd_jwt)?;
 
-    let disclosures = v.as_object().unwrap().get("disclosures").unwrap();
+    decode_payload(&parsed.payload, &parsed.header.disclosures, remove_decoy)
+}
 
+fn parse_payload_general_json(sd_jwt: &str, remove_decoy: bool) -> Result<Value> {
+    let parsed: GeneralJsonSdJwt = serde_json::from_str(sd_jwt)?;
+
+    // RFC 9901 §8.3: the Disclosures live in the first signature's unprotected header.
+    let signature = parsed.signatures.first().ok_or_else(|| Error::from_msg(
+        ErrorKind::Input,
+        "General JSON SD-JWT must contain at least one signature",
+    ))?;
+
+    decode_payload(&parsed.payload, &signature.header.disclosures, remove_decoy)
+}
+
+fn decode_payload(payload: &str, disclosures: &[String], remove_decoy: bool) -> Result<Value> {
     let mut hashes: HashSet<String> = HashSet::new();
 
-    for disclosure in disclosures.as_array().unwrap() {
-        let hash = base64_hash(disclosure.as_str().unwrap().replace(' ', "").as_bytes());
-        hashes.insert(hash.clone());
+    for disclosure in disclosures {
+        let hash = base64_hash(disclosure.as_bytes());
+        hashes.insert(hash);
     }
 
-    let ddd = v.as_object().unwrap().get("payload").unwrap().as_str().unwrap().replace(' ', "");
-    let payload = base64url_decode(&ddd).unwrap();
+    let payload = base64url_decode(payload).unwrap();
 
-    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&payload)?;
 
     if remove_decoy {
         return Ok(remove_decoy_items(&payload, &hashes));
