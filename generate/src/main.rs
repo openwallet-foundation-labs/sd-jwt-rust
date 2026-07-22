@@ -63,7 +63,7 @@ fn generate_and_check(
 
     match &specs.serialization_format {
         Some(format) if format == "json" => {
-            serialization_format = SDJWTSerializationFormat::JSON;
+            serialization_format = SDJWTSerializationFormat::FlattenedJson;
             stored_sd_jwt_file_path = directory.join(format!("{SD_JWT_FILE_NAME_TEMPLATE}.json"));
         },
         Some(format) if format == "compact" => {
