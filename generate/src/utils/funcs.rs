@@ -12,8 +12,8 @@ use sd_jwt_rs::utils::{base64_hash, base64url_decode};
 use sd_jwt_rs::utils::SALTS;
 use crate::error::{Error, ErrorKind, Result};
 
-// Local mirrors of the lib's JWS JSON serialization structs (SDJWTFlattenedJson /
-// SDJWTGeneralJson); the lib's `payload` field is private, so they cannot be reused here.
+// Mirrors of the lib's JWS JSON serialization structs (SDJWTFlattenedJson / SDJWTGeneralJson)
+// The lib's `payload` field is private, so they cannot be reused here
 #[derive(Deserialize)]
 struct FlattenedJsonSdJwt {
     payload: String,
