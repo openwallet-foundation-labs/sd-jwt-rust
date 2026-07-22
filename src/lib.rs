@@ -6,11 +6,15 @@ use crate::error::Error;
 use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
 
 use error::Result;
+use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use strum::Display;
 use std::collections::HashMap;
+use std::str::FromStr;
 pub use {holder::SDJWTHolder, issuer::SDJWTIssuer, issuer::ClaimsForSelectiveDisclosureStrategy, verifier::SDJWTVerifier};
+
+pub type KeyResolver = dyn Fn(&str, &Header) -> DecodingKey;
 
 mod disclosure;
 pub mod error;
@@ -93,6 +97,35 @@ pub struct SDJWTUnprotectedHeader {
 
 // Define the SDJWTCommon struct to hold common properties.
 impl SDJWTCommon {
+    fn verify_signature(&self, key: &DecodingKey) -> Result<()> {
+        let sd_jwt = self
+            .unverified_sd_jwt
+            .as_ref()
+            .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
+        let alg_str = self.sign_alg.as_deref().ok_or_else(|| {
+            Error::InvalidInput(
+                "Issuer-signed JWT header is missing the `alg` parameter".to_string(),
+            )
+        })?;
+        let algorithm =
+            Algorithm::from_str(alg_str).map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let mut validation = Validation::new(algorithm);
+        // RFC 9901 §4.1: `exp` is not mandated, so don't require it. `validate_exp`
+        // stays true, so a present `exp` is still checked for expiry.
+        validation.required_spec_claims.remove("exp");
+        // `nbf` is optional too (not added to required_spec_claims), but when
+        // present it must be honored; jsonwebtoken leaves `validate_nbf` off.
+        validation.validate_nbf = true;
+        // A present `aud` in the Issuer-signed JWT is the Issuer's audience, not one
+        // the Holder validates here; jsonwebtoken rejects a present `aud` when no
+        // expected audience is set, so disable that check for the signature step.
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<Map<String, Value>>(sd_jwt, key, &validation).map_err(|e| {
+            Error::DeserializationError(format!("Issuer signature verification failed: {}", e))
+        })?;
+        Ok(())
+    }
+
     fn create_hash_mappings(&mut self) -> Result<()> {
         self.hash_to_decoded_disclosure = HashMap::new();
         self.hash_to_disclosure = HashMap::new();

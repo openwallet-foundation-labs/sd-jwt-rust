@@ -319,8 +319,13 @@ fn demo_positive_cases(
     )
         .unwrap();
     let issued = sd_jwt.clone();
-    // Holder creates presentation
-    let mut holder = SDJWTHolder::new(sd_jwt.clone(), format.clone()).unwrap();
+    let mut holder = SDJWTHolder::new(
+        sd_jwt.clone(),
+        format.clone(),
+        Box::new(|_, _| DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap()),
+    )
+    .unwrap();
+    // Holder creates presentation.
     let presentation = holder
         .create_presentation(
             holder_disclosed_claims,

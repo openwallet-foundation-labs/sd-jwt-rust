@@ -81,7 +81,7 @@ fn generate_and_check(
     };
 
     let sd_jwt = issue_sd_jwt(directory, &specs, settings, serialization_format.clone(), decoy)?;
-    let presentation = create_presentation(&sd_jwt, serialization_format.clone(), &specs.holder_disclosed_claims)?;
+    let presentation = create_presentation(directory, &sd_jwt, serialization_format.clone(), &specs.holder_disclosed_claims)?;
 
     // Verify presentation
     let verified_claims = verify_presentation(directory, &presentation, serialization_format.clone())?;
@@ -152,11 +152,21 @@ fn issue_sd_jwt(
 }
 
 fn create_presentation(
+    directory: &PathBuf,
     sd_jwt: &str,
     serialization_format: SDJWTSerializationFormat,
     disclosed_claims: &serde_json::Map<String, serde_json::Value>
 ) -> Result<String> {
-    let mut holder = SDJWTHolder::new(sd_jwt.to_string(), serialization_format).unwrap();
+    let pub_key_path = directory.clone().join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME);
+    let mut holder = SDJWTHolder::new(
+        sd_jwt.to_string(),
+        serialization_format,
+        Box::new(move |_, _| {
+            let key = std::fs::read(&pub_key_path).expect("Failed to read file");
+            DecodingKey::from_ec_pem(&key).expect("Unable to create DecodingKey")
+        }),
+    )
+    .unwrap();
 
     let presentation = holder
         .create_presentation(
