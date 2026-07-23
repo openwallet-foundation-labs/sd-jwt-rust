@@ -43,6 +43,20 @@ pub fn base64url_decode(b64data: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::DeserializationError(e.to_string()))
 }
 
+pub(crate) fn base64_standard_decode(b64data: &str) -> Result<Vec<u8>> {
+    general_purpose::STANDARD
+        .decode(b64data)
+        .map_err(|e| Error::DeserializationError(e.to_string()))
+}
+
+/// Current time as whole seconds since the Unix epoch.
+pub(crate) fn now_seconds() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| Error::ConversionError(format!("timestamp: {}", e)))
+}
+
 pub(crate) fn generate_salt() -> String {
     let mut buf = [0u8; 16];
     ThreadRng::default().fill_bytes(&mut buf);
@@ -60,7 +74,7 @@ pub(crate) fn jwt_payload_decode(b64data: &str) -> Result<serde_json::Map<String
         &String::from_utf8(
             base64url_decode(b64data).map_err(|e| DeserializationError(e.to_string()))?,
         )
-            .map_err(|e| DeserializationError(e.to_string()))?,
+        .map_err(|e| DeserializationError(e.to_string()))?,
     )
-        .map_err(|e| DeserializationError(e.to_string()))
+    .map_err(|e| DeserializationError(e.to_string()))
 }

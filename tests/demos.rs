@@ -12,12 +12,48 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::ClaimsForSelectiveDisclosureStrategy;
-use sd_jwt_rs::{SDJWTHolder, SDJWTIssuer, SDJWTVerifier, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTSerializationFormat};
+use sd_jwt_rs::{
+    SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat,
+    SDJWTVerifier,
+};
 use sd_jwt_rs::{COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 mod utils;
+
+fn issuer_crypto_provider(
+    key: EncodingKey,
+    alg: Option<&str>,
+) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_signing_key(key, alg);
+    Box::new(provider)
+}
+
+fn holder_crypto_provider(
+    holder_key: Option<EncodingKey>,
+    alg: Option<&str>,
+) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let mut provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_verifying_key(
+        DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap(),
+        alg,
+    );
+    if let Some(holder_key) = holder_key {
+        provider = provider.with_signing_key(holder_key, alg);
+    }
+    Box::new(provider)
+}
+
+fn verifier_crypto_provider(alg: Option<&str>) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_verifying_key(
+        DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap(),
+        alg,
+    );
+    Box::new(provider)
+}
 
 #[fixture]
 fn issuer_key() -> EncodingKey {
@@ -129,7 +165,9 @@ fn address_only_structured_one_open<'a>() -> (
 
     (
         value,
-        ClaimsForSelectiveDisclosureStrategy::Custom(ADDRESS_ONLY_STRUCTURED_ONE_OPEN_JSONPATH.to_vec()),
+        ClaimsForSelectiveDisclosureStrategy::Custom(
+            ADDRESS_ONLY_STRUCTURED_ONE_OPEN_JSONPATH.to_vec(),
+        ),
         claims_to_disclose,
         number_of_revealed_sds,
     )
@@ -303,37 +341,37 @@ fn demo_positive_cases(
         Option<EncodingKey>,
         Option<Jwk>,
     ),
-    #[values(SDJWTSerializationFormat::Compact, SDJWTSerializationFormat::FlattenedJson, SDJWTSerializationFormat::GeneralJson)] format: SDJWTSerializationFormat,
+    #[values(
+        SDJWTSerializationFormat::Compact,
+        SDJWTSerializationFormat::FlattenedJson,
+        SDJWTSerializationFormat::GeneralJson
+    )]
+    format: SDJWTSerializationFormat,
     #[values(None, Some(DEFAULT_SIGNING_ALG.to_owned()))] sign_algo: Option<String>,
     #[values(true, false)] add_decoy: bool,
 ) {
     let (user_claims, strategy, holder_disclosed_claims, number_of_revealed_sds) = data;
     let (nonce, aud, holder_key, holder_jwk) = presentation_metadata;
     // Issuer issues SD-JWT
-    let sd_jwt = SDJWTIssuer::new(issuer_key, sign_algo.clone()).issue_sd_jwt(
-        user_claims.clone(),
-        strategy,
-        holder_jwk.clone(),
-        add_decoy,
-        format.clone(),
-    )
+    let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider(issuer_key, sign_algo.as_deref()))
+        .issue_sd_jwt(
+            user_claims.clone(),
+            strategy,
+            holder_jwk.clone(),
+            add_decoy,
+            format.clone(),
+        )
         .unwrap();
     let issued = sd_jwt.clone();
     let mut holder = SDJWTHolder::new(
         sd_jwt.clone(),
         format.clone(),
-        Box::new(|_, _| DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap()),
+        holder_crypto_provider(holder_key, sign_algo.as_deref()),
     )
     .unwrap();
     // Holder creates presentation.
     let presentation = holder
-        .create_presentation(
-            holder_disclosed_claims,
-            nonce.clone(),
-            aud.clone(),
-            holder_key,
-            sign_algo,
-        )
+        .create_presentation(holder_disclosed_claims, nonce.clone(), aud.clone())
         .unwrap();
 
     match format {
@@ -348,7 +386,8 @@ fn demo_positive_cases(
                 .collect();
             revealed_parts.remove("");
 
-            let intersected_parts: HashSet<_> = issued_parts.intersection(&revealed_parts).collect();
+            let intersected_parts: HashSet<_> =
+                issued_parts.intersection(&revealed_parts).collect();
             // Compare that number of disclosed parts are equal
             let mut revealed_parts_number = revealed_parts.len();
             if holder_jwk.is_some() {
@@ -404,13 +443,10 @@ fn demo_positive_cases(
     // Verify presentation
     let _verified = SDJWTVerifier::new(
         presentation.clone(),
-        Box::new(|_, _| {
-            let public_issuer_bytes = ISSUER_PUBLIC_KEY.as_bytes();
-            DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-        }),
+        verifier_crypto_provider(sign_algo.as_deref()),
         aud,
         nonce,
         format,
     )
-        .unwrap();
+    .unwrap();
 }
