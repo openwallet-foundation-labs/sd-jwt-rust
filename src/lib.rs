@@ -3,22 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::error::Error;
-use crate::utils::{base64_hash, base64url_decode, jwt_payload_decode};
+use crate::utils::{
+    base64_hash, base64_standard_decode, base64url_decode, jwt_payload_decode, now_seconds,
+};
 
 use error::Result;
-use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::str::FromStr;
 use strum::Display;
 pub use {
-    holder::SDJWTHolder, issuer::ClaimsForSelectiveDisclosureStrategy, issuer::SDJWTIssuer,
+    crypto_provider::{KeyRequest, SDJWTCryptoProvider, SDJWTCryptoProviderBuiltin, SignatureRole},
+    holder::SDJWTHolder,
+    issuer::ClaimsForSelectiveDisclosureStrategy,
+    issuer::SDJWTIssuer,
     verifier::SDJWTVerifier,
 };
 
-pub type KeyResolver = dyn Fn(&str, &Header) -> DecodingKey;
-
+pub mod crypto_provider;
 mod disclosure;
 pub mod error;
 pub mod holder;
@@ -57,6 +59,13 @@ pub enum SDJWTSerializationFormat {
     Compact,
 }
 
+pub(crate) struct ProtectedHeader {
+    pub(crate) alg: String,
+    pub(crate) typ: Option<String>,
+    pub(crate) kid: Option<String>,
+    pub(crate) x5c: Option<Vec<Vec<u8>>>,
+}
+
 #[derive(Default)]
 pub(crate) struct SDJWTCommon {
     typ: Option<String>,
@@ -67,7 +76,6 @@ pub(crate) struct SDJWTCommon {
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
     input_disclosures: Vec<String>,
-    sign_alg: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
@@ -100,33 +108,163 @@ pub struct SDJWTUnprotectedHeader {
 
 // Define the SDJWTCommon struct to hold common properties.
 impl SDJWTCommon {
-    fn verify_signature(&self, key: &DecodingKey) -> Result<()> {
+    fn parse_protected_header(jwt: &str) -> Result<ProtectedHeader> {
+        let header_b64 = jwt
+            .split(JWT_SEPARATOR)
+            .next()
+            .ok_or(Error::InvalidInput("Cannot extract JWT header".to_string()))?;
+        let decoded = base64url_decode(header_b64)?;
+        let header: Value = serde_json::from_slice(&decoded)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let alg = header
+            .get("alg")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::InvalidInput("JWT header is missing the `alg` parameter".to_string())
+            })?
+            .to_owned();
+        crate::crypto_provider::reject_unacceptable_alg(&alg)?;
+        let typ = header.get("typ").and_then(Value::as_str).map(str::to_owned);
+        let kid = header.get("kid").and_then(Value::as_str).map(str::to_owned);
+        let x5c = header
+            .get("x5c")
+            .map(|certs| {
+                certs
+                    .as_array()
+                    .ok_or_else(|| Error::InvalidInput("`x5c` must be an array".to_string()))?
+                    .iter()
+                    .map(|cert| {
+                        cert.as_str()
+                            .ok_or_else(|| {
+                                Error::InvalidInput("`x5c` entries must be strings".to_string())
+                            })
+                            .and_then(|cert| {
+                                base64_standard_decode(cert).map_err(|e| {
+                                    Error::DeserializationError(format!(
+                                        "Invalid base64 in `x5c` certificate: {}",
+                                        e
+                                    ))
+                                })
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        Ok(ProtectedHeader { alg, typ, kid, x5c })
+    }
+
+    fn build_key_request(&self) -> Result<KeyRequest> {
         let sd_jwt = self
             .unverified_sd_jwt
             .as_ref()
             .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
-        let alg_str = self.sign_alg.as_deref().ok_or_else(|| {
-            Error::InvalidInput(
-                "Issuer-signed JWT header is missing the `alg` parameter".to_string(),
-            )
-        })?;
-        let algorithm =
-            Algorithm::from_str(alg_str).map_err(|e| Error::DeserializationError(e.to_string()))?;
-        let mut validation = Validation::new(algorithm);
-        // RFC 9901 §4.1: `exp` is not mandated, so don't require it. `validate_exp`
-        // stays true, so a present `exp` is still checked for expiry.
-        validation.required_spec_claims.remove("exp");
-        // `nbf` is optional too (not added to required_spec_claims), but when
-        // present it must be honored; jsonwebtoken leaves `validate_nbf` off.
-        validation.validate_nbf = true;
-        // A present `aud` in the Issuer-signed JWT is the Issuer's audience, not one
-        // the Holder validates here; jsonwebtoken rejects a present `aud` when no
-        // expected audience is set, so disable that check for the signature step.
-        validation.validate_aud = false;
-        jsonwebtoken::decode::<Map<String, Value>>(sd_jwt, key, &validation).map_err(|e| {
-            Error::DeserializationError(format!("Issuer signature verification failed: {}", e))
-        })?;
+        let header = Self::parse_protected_header(sd_jwt)?;
+        let iss = self
+            .unverified_input_sd_jwt_payload
+            .as_ref()
+            .ok_or(Error::InvalidState("Cannot reference payload".to_string()))?
+            .get("iss")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Ok(KeyRequest {
+            role: SignatureRole::IssuerJwt,
+            iss,
+            kid: header.kid,
+            alg: header.alg,
+            x5c: header.x5c,
+            jwk: None,
+        })
+    }
+
+    /// Verify a compact JWS with `crypto_provider` and return its decoded
+    /// payload claims. Shared by Issuer-JWT and Key Binding JWT verification so
+    /// the signing-input reconstruction stays identical for both. Enforces the
+    /// provider's algorithm allowlist (RFC 8725 §3.1) before invoking
+    /// `verify`, so the (attacker-controlled) header `alg` can never select
+    /// the verification algorithm regardless of the provider implementation.
+    fn verify_compact_jws(
+        jwt: &str,
+        request: &KeyRequest,
+        crypto_provider: &dyn SDJWTCryptoProvider,
+    ) -> Result<Map<String, Value>> {
+        let allowed = crypto_provider.allowed_verifying_algs(request.role)?;
+        if !allowed.iter().any(|alg| alg == &request.alg) {
+            return Err(Error::InvalidInput(format!(
+                "JWT `alg` \"{}\" is not an allowed verification algorithm for the {}",
+                request.alg,
+                match request.role {
+                    SignatureRole::IssuerJwt => "Issuer-signed JWT",
+                    SignatureRole::KeyBindingJwt => "Key Binding JWT",
+                },
+            )));
+        }
+        let (protected, payload, signature) = Self::split_jwt(jwt)?;
+        let message = format!("{protected}.{payload}");
+        let signature = base64url_decode(&signature)?;
+        crypto_provider.verify(message.as_bytes(), &signature, request)?;
+        jwt_payload_decode(&payload)
+    }
+
+    /// Process an Issuer-signed JWT and return its payload claims. The keyless
+    /// checks — `alg` rejection (via `build_key_request`) and temporal
+    /// validation — always run; only the cryptographic signature check is
+    /// gated on a crypto provider, so a Holder may opt out of signature
+    /// verification with `None` while the library still rejects a
+    /// malformed-`alg` or expired Issuer JWT.
+    fn process_issuer_jwt(
+        &self,
+        crypto_provider: Option<&dyn SDJWTCryptoProvider>,
+    ) -> Result<Map<String, Value>> {
+        let sd_jwt = self
+            .unverified_sd_jwt
+            .as_ref()
+            .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
+        let request = self.build_key_request()?;
+        let claims = match crypto_provider {
+            Some(crypto_provider) => Self::verify_compact_jws(sd_jwt, &request, crypto_provider)?,
+            None => {
+                let (_, payload, _) = Self::split_jwt(sd_jwt)?;
+                jwt_payload_decode(&payload)?
+            }
+        };
+        // A present `aud` in the Issuer-signed JWT is deliberately not checked
+        // here: `expected_aud` applies to the Key Binding JWT.
+        Self::validate_temporal(&claims)?;
+        Ok(claims)
+    }
+
+    fn validate_temporal(payload: &Map<String, Value>) -> Result<()> {
+        // `exp`/`nbf` are optional and checked only when present, with a
+        // 60-second leeway. NumericDate may be fractional, so parse as f64; a
+        // present-but-non-numeric value fails closed instead of being skipped.
+        const LEEWAY_SECONDS: u64 = 60;
+        let now = now_seconds()?;
+        if let Some(exp) = Self::numeric_date(payload, "exp")? {
+            if exp < now.saturating_sub(LEEWAY_SECONDS) as f64 {
+                return Err(Error::InvalidInput(
+                    "JWT is expired (`exp` is in the past)".to_string(),
+                ));
+            }
+        }
+        if let Some(nbf) = Self::numeric_date(payload, "nbf")? {
+            if nbf > now.saturating_add(LEEWAY_SECONDS) as f64 {
+                return Err(Error::InvalidInput(
+                    "JWT is not yet valid (`nbf` is in the future)".to_string(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// A JWT NumericDate claim as `f64` (values may be fractional). `Ok(None)`
+    /// if absent; `Err` if present but not a JSON number.
+    fn numeric_date(payload: &Map<String, Value>, claim: &str) -> Result<Option<f64>> {
+        match payload.get(claim) {
+            None => Ok(None),
+            Some(value) => value.as_f64().map(Some).ok_or_else(|| {
+                Error::InvalidInput(format!("`{}` is not a valid NumericDate", claim))
+            }),
+        }
     }
 
     fn create_hash_mappings(&mut self) -> Result<()> {
@@ -203,7 +341,6 @@ impl SDJWTCommon {
             length: parts.len(),
             msg: format!("Invalid SD-JWT: {}", sd_jwt_with_disclosures),
         })?;
-        self.sign_alg = Self::decode_header_and_get_sign_algorithm(sd_jwt);
         let trailing = parts.next_back().unwrap_or("");
         self.unverified_input_key_binding_jwt = if trailing.is_empty() {
             None
@@ -238,7 +375,6 @@ impl SDJWTCommon {
             parsed.protected, parsed.payload, parsed.signature
         );
         self.unverified_sd_jwt = Some(sd_jwt.clone());
-        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);
         Ok(())
     }
 
@@ -267,7 +403,6 @@ impl SDJWTCommon {
             signature.protected, parsed.payload, signature.signature
         );
         self.unverified_sd_jwt = Some(sd_jwt.clone());
-        self.sign_alg = Self::decode_header_and_get_sign_algorithm(&sd_jwt);
         Ok(())
     }
 
@@ -282,27 +417,6 @@ impl SDJWTCommon {
             }
         }
     }
-    /// Decodes a header jwt string and extracts the "alg" field from the JSON object.
-    /// # Arguments
-    /// * `sd_jwt` - jwt format string.
-    /// # Returns
-    /// * `Option<String>` - The result containing the algorithm String e.g ES256 or on failure None.
-    fn decode_header_and_get_sign_algorithm(sd_jwt: &str) -> Option<String> {
-        let parts: Vec<&str> = sd_jwt.split('.').collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        let jwt_header = parts[0];
-        let decoded = base64url_decode(jwt_header).ok()?;
-        let decoded_str = std::str::from_utf8(&decoded).ok()?;
-        let json_sign_alg: Value = serde_json::from_str(decoded_str).ok()?;
-        let sign_alg = json_sign_alg
-            .get("alg")
-            .and_then(Value::as_str)
-            .map(String::from);
-        sign_alg
-    }
-
     /// Splits a signed JWT (`protected.payload.signature`) into its three parts.
     fn split_jwt(jwt: &str) -> Result<(String, String, String)> {
         let parts: Vec<&str> = jwt.split('.').collect();
@@ -387,6 +501,42 @@ mod tests {
             format!("{err}").contains("at least one signature"),
             "empty `signatures` array should be rejected: {err}"
         );
+    }
+
+    #[test]
+    fn validate_temporal_rejects_expired_fractional_exp() {
+        // A fractional NumericDate in the past must be rejected, not skipped.
+        let payload = json!({ "exp": 1000.5 }).as_object().unwrap().clone();
+        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        assert!(format!("{err}").contains("expired"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_temporal_rejects_non_numeric_exp() {
+        // A present-but-non-numeric `exp` fails closed instead of being ignored.
+        let payload = json!({ "exp": "1883000000" }).as_object().unwrap().clone();
+        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        assert!(format!("{err}").contains("NumericDate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_temporal_rejects_future_fractional_nbf() {
+        let payload = json!({ "nbf": 9999999999.0_f64 })
+            .as_object()
+            .unwrap()
+            .clone();
+        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        assert!(format!("{err}").contains("not yet valid"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_temporal_accepts_absent_and_valid() {
+        assert!(SDJWTCommon::validate_temporal(&json!({}).as_object().unwrap().clone()).is_ok());
+        let payload = json!({ "exp": 9999999999_u64, "nbf": 1_u64 })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(SDJWTCommon::validate_temporal(&payload).is_ok());
     }
 
     #[test]

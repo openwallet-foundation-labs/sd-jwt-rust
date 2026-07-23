@@ -22,8 +22,37 @@ use std::collections::HashSet;
 
 mod utils;
 
-fn issuer_key_resolver() -> Box<sd_jwt_rs::KeyResolver> {
-    Box::new(|_, _| DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap())
+fn issuer_crypto_provider(
+    key: EncodingKey,
+    alg: Option<&str>,
+) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_signing_key(key, alg);
+    Box::new(provider)
+}
+
+fn holder_crypto_provider(
+    holder_key: Option<EncodingKey>,
+    alg: Option<&str>,
+) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let mut provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_verifying_key(
+        DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap(),
+        alg,
+    );
+    if let Some(holder_key) = holder_key {
+        provider = provider.with_signing_key(holder_key, alg);
+    }
+    Box::new(provider)
+}
+
+fn verifier_crypto_provider(alg: Option<&str>) -> Box<dyn sd_jwt_rs::SDJWTCryptoProvider> {
+    let alg = alg.unwrap_or(DEFAULT_SIGNING_ALG);
+    let provider = sd_jwt_rs::SDJWTCryptoProviderBuiltin::new().with_verifying_key(
+        DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap(),
+        alg,
+    );
+    Box::new(provider)
 }
 
 #[fixture]
@@ -324,7 +353,7 @@ fn demo_positive_cases(
     let (user_claims, strategy, holder_disclosed_claims, number_of_revealed_sds) = data;
     let (nonce, aud, holder_key, holder_jwk) = presentation_metadata;
     // Issuer issues SD-JWT
-    let sd_jwt = SDJWTIssuer::new(issuer_key, sign_algo.clone())
+    let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider(issuer_key, sign_algo.as_deref()))
         .issue_sd_jwt(
             user_claims.clone(),
             strategy,
@@ -334,17 +363,15 @@ fn demo_positive_cases(
         )
         .unwrap();
     let issued = sd_jwt.clone();
-    let mut holder =
-        SDJWTHolder::new(sd_jwt.clone(), format.clone(), issuer_key_resolver()).unwrap();
+    let mut holder = SDJWTHolder::new(
+        sd_jwt.clone(),
+        format.clone(),
+        holder_crypto_provider(holder_key, sign_algo.as_deref()),
+    )
+    .unwrap();
     // Holder creates presentation.
     let presentation = holder
-        .create_presentation(
-            holder_disclosed_claims,
-            nonce.clone(),
-            aud.clone(),
-            holder_key,
-            sign_algo,
-        )
+        .create_presentation(holder_disclosed_claims, nonce.clone(), aud.clone())
         .unwrap();
 
     match format {
@@ -416,7 +443,7 @@ fn demo_positive_cases(
     // Verify presentation
     let _verified = SDJWTVerifier::new(
         presentation.clone(),
-        issuer_key_resolver(),
+        verifier_crypto_provider(sign_algo.as_deref()),
         aud,
         nonce,
         format,

@@ -7,32 +7,29 @@ use crate::{
 };
 use error::Result;
 use std::collections::{HashMap, VecDeque};
-use std::str::FromStr;
 use std::vec::Vec;
 
 use jsonwebtoken::jwk::Jwk;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rand::Rng;
 use serde_json::Value;
 use serde_json::{json, Map as SJMap, Map};
 
+use crate::crypto_provider::{encode_jws, SDJWTCryptoProvider, SignatureRole};
 use crate::disclosure::SDJWTDisclosure;
 use crate::error::Error;
 use crate::utils::{base64_hash, generate_salt};
 use crate::{
     SDJWTCommon, SDJWTSerializationFormat, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
-    DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY,
-    SD_LIST_PREFIX,
+    DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
 };
 
 pub struct SDJWTIssuer {
     // parameters
-    sign_alg: String,
     add_decoy_claims: bool,
     extra_header_parameters: Option<HashMap<String, String>>,
 
     // input data
-    issuer_key: EncodingKey,
+    crypto_provider: Box<dyn SDJWTCryptoProvider>,
     holder_key: Option<Jwk>,
 
     // internal fields
@@ -121,17 +118,15 @@ impl SDJWTIssuer {
     /// The instance can be used mutliple times to issue SD-JWTs.
     ///
     /// # Arguments
-    /// * `issuer_key` - The key used to sign the SD-JWT.
-    /// * `sign_alg` - The signing algorithm used to sign the SD-JWT. If not provided, the default algorithm is used.
+    /// * `crypto_provider` - Crypto provider that signs the SD-JWT.
     ///
     /// # Returns
     /// A new SDJWTIssuer instance.
-    pub fn new(issuer_key: EncodingKey, sign_alg: Option<String>) -> Self {
+    pub fn new(crypto_provider: Box<dyn SDJWTCryptoProvider>) -> Self {
         SDJWTIssuer {
-            sign_alg: sign_alg.unwrap_or(DEFAULT_SIGNING_ALG.to_owned()),
             add_decoy_claims: false,
             extra_header_parameters: None,
-            issuer_key,
+            crypto_provider,
             holder_key: None,
             inner: Default::default(),
             all_disclosures: vec![],
@@ -314,13 +309,18 @@ impl SDJWTIssuer {
             unimplemented!("extra_headers are not supported for issuance");
         }
 
-        let mut header = Header::new(
-            Algorithm::from_str(&self.sign_alg)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?,
-        );
-        header.typ = self.inner.typ.clone();
-        self.signed_sd_jwt = jsonwebtoken::encode(&header, &self.sd_jwt_payload, &self.issuer_key)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let alg = self.crypto_provider.signing_alg(SignatureRole::IssuerJwt)?;
+        let mut header = SJMap::new();
+        header.insert("alg".to_string(), Value::String(alg));
+        if let Some(typ) = &self.inner.typ {
+            header.insert("typ".to_string(), Value::String(typ.clone()));
+        }
+        self.signed_sd_jwt = encode_jws(
+            &header,
+            &self.sd_jwt_payload,
+            self.crypto_provider.as_ref(),
+            SignatureRole::IssuerJwt,
+        )?;
 
         Ok(())
     }
@@ -405,6 +405,74 @@ mod tests {
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
 
+    fn issuer_crypto_provider(
+        key: EncodingKey,
+        alg: Option<&str>,
+    ) -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new()
+                .with_signing_key(key, alg.unwrap_or(crate::DEFAULT_SIGNING_ALG)),
+        )
+    }
+
+    /// Crypto provider whose `signing_alg` succeeds but whose `sign` fails, for
+    /// exercising error propagation from the signing call itself (e.g. an
+    /// HSM that goes unavailable between the two calls).
+    struct SignFailingProvider;
+    impl crate::SDJWTCryptoProvider for SignFailingProvider {
+        fn signing_alg(&self, _: crate::SignatureRole) -> crate::error::Result<String> {
+            Ok(crate::DEFAULT_SIGNING_ALG.to_string())
+        }
+        fn allowed_verifying_algs(
+            &self,
+            _: crate::SignatureRole,
+        ) -> crate::error::Result<Vec<String>> {
+            Ok(vec![crate::DEFAULT_SIGNING_ALG.to_string()])
+        }
+        fn sign(&self, _: &[u8], _: crate::SignatureRole) -> crate::error::Result<Vec<u8>> {
+            Err(crate::error::Error::KeyNotFound(
+                "keystore unavailable".to_string(),
+            ))
+        }
+        fn verify(&self, _: &[u8], _: &[u8], _: &crate::KeyRequest) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn issue_propagates_provider_sign_error() {
+        let result = SDJWTIssuer::new(Box::new(SignFailingProvider)).issue_sd_jwt(
+            json!({"iss": "https://example.com/issuer", "sub": "6c5c0a49"}),
+            ClaimsForSelectiveDisclosureStrategy::AllLevels,
+            None,
+            false,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("issuance succeeded although the provider cannot sign"),
+            Err(err) => assert!(
+                err.to_string().contains("keystore unavailable"),
+                "got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn issue_fails_without_signing_key() {
+        let result = SDJWTIssuer::new(Box::new(crate::SDJWTCryptoProviderBuiltin::new()))
+            .issue_sd_jwt(
+                json!({"iss": "https://example.com/issuer", "sub": "6c5c0a49"}),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            );
+        assert!(
+            result.is_err(),
+            "issuance must fail when the provider has no signing key"
+        );
+    }
+
     #[test]
     fn test_assembly_sd_full_recursive() {
         let user_claims = json!({
@@ -421,7 +489,7 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider(issuer_key, None))
             .issue_sd_jwt(
                 user_claims,
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
