@@ -58,6 +58,9 @@ impl SDJWTHolder {
 
     /// Like [`SDJWTHolder::new`], but skips the cryptographic Issuer-signature
     /// check — for inputs already verified out of band or for test fixtures.
+    /// The keyless checks (header `alg` sanity, `exp`/`nbf` validation) still
+    /// run. No crypto provider is attached, so `create_presentation` cannot
+    /// create a Key Binding JWT.
     ///
     /// # Arguments
     /// * `sd_jwt_with_disclosures` - SD JWT with disclosures in the format specified by `serialization_format`

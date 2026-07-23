@@ -9,27 +9,66 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::str::FromStr;
 
+/// Which signature a [SDJWTCryptoProvider] call concerns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureRole {
+    /// The signature over the Issuer-signed JWT, made with the Issuer's key.
     IssuerJwt,
+    /// The signature over the Key Binding JWT, made with the Holder's key.
     KeyBindingJwt,
 }
 
+/// Material the library extracts from a JWT for a [SDJWTCryptoProvider] to
+/// select the verification key. Every field is unverified, attacker-controlled
+/// input: a successful `verify` asserts that the signature was checked against
+/// a key trusted for the signer these fields claim. A provider that requires a
+/// known issuer should scope its key lookup by `iss` and reject `iss == None`;
+/// use `x5c` only after validating the chain to a trust anchor; return an
+/// error (e.g. [Error::KeyNotFound]) for an unknown issuer or key.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct KeyRequest {
+    /// Which signature this request is for.
     pub role: SignatureRole,
+    /// Unverified `iss` claim from the payload, if present.
     pub iss: Option<String>,
+    /// `kid` from the protected header, if present.
     pub kid: Option<String>,
+    /// JWS `alg` wire name from the protected header (e.g. "ES256"), passed
+    /// through raw so crypto providers may support algorithms the library does not.
     pub alg: String,
+    /// X.509 certificate chain from the protected header (`x5c`),
+    /// base64-decoded to DER.
     pub x5c: Option<Vec<Vec<u8>>>,
+    /// [SignatureRole::KeyBindingJwt] only: the Holder's public key from the
+    /// verified Issuer payload's `cnf`, as a JWK JSON string.
     pub jwk: Option<String>,
 }
 
+/// Signing and verification behind one injectable interface, so key storage and
+/// crypto can live outside the library (e.g. platform keystores reached over
+/// FFI, where keys are non-extractable and only operations cross the
+/// boundary). `message` is always the raw JWS signing input
+/// (`BASE64URL(header) . BASE64URL(payload)` as bytes); signatures are raw
+/// bytes — the library owns all JWS encoding and decoding.
+///
+/// `Send + Sync` so an injected provider (e.g. an FFI-backed keystore) can be
+/// held by an issuer/holder/verifier shared across threads.
 pub trait SDJWTCryptoProvider: Send + Sync {
+    /// JWS `alg` wire name that `sign(role)` produces.
     fn signing_alg(&self, role: SignatureRole) -> Result<String>;
+    /// JWS `alg` values this provider accepts when verifying a `role`
+    /// signature — the RFC 8725 §3.1 algorithm allowlist. A verification
+    /// algorithm must never be selected by the (attacker-controlled) JWT
+    /// header, so the library rejects a JWT whose header `alg` is not in
+    /// this list *before* calling [SDJWTCryptoProvider::verify];
+    /// implementations cannot forget the check.
     fn allowed_verifying_algs(&self, role: SignatureRole) -> Result<Vec<String>>;
+    /// Sign `message` with the key this crypto provider holds for `role`.
+    /// Verify-only crypto providers return an error.
     fn sign(&self, message: &[u8], role: SignatureRole) -> Result<Vec<u8>>;
+    /// Verify `signature` over `message` for the signer `request` describes.
+    /// Key selection AND trust are the implementation's responsibility.
     fn verify(&self, message: &[u8], signature: &[u8], request: &KeyRequest) -> Result<()>;
 }
 
@@ -48,6 +87,13 @@ const ASYMMETRIC_JWS_ALGS: &[&str] = &[
     "ES256", "ES384", "EdDSA", "RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
 ];
 
+/// Software crypto provider over jsonwebtoken: at most one signing key and one pinned
+/// verifying key. Verification requires the pinned key AND the pinned
+/// algorithm for the Issuer JWT; the Key Binding JWT is verified with the
+/// in-band `cnf` key from the request. In both cases a symmetric (`HS*`)
+/// `alg` is rejected outright: the in-band `cnf` key only ever carries public
+/// key material, so honoring an HMAC alg there would let anyone holding that
+/// public key forge a signature.
 pub struct SDJWTCryptoProviderBuiltin {
     signing: Option<KeyWithAlg<EncodingKey>>,
     verifying: Option<KeyWithAlg<DecodingKey>>,
@@ -55,6 +101,8 @@ pub struct SDJWTCryptoProviderBuiltin {
 }
 
 impl SDJWTCryptoProviderBuiltin {
+    /// A crypto provider with no keys; add them with
+    /// [Self::with_signing_key] and [Self::with_verifying_key].
     pub fn new() -> Self {
         Self {
             signing: None,
@@ -63,6 +111,8 @@ impl SDJWTCryptoProviderBuiltin {
         }
     }
 
+    /// Sign with `key` under the JWS algorithm `alg` (a `jsonwebtoken` wire
+    /// name such as `"ES256"`; `key` must be of the matching family).
     pub fn with_signing_key(mut self, key: EncodingKey, alg: &str) -> Self {
         self.signing = Some(KeyWithAlg {
             key,
@@ -71,6 +121,9 @@ impl SDJWTCryptoProviderBuiltin {
         self
     }
 
+    /// Verify Issuer JWTs with `key`, accepting exactly the algorithm `alg`
+    /// and rejecting any other. Key Binding JWTs are verified with the
+    /// in-band `cnf` key instead, so they need no pinned key here.
     pub fn with_verifying_key(mut self, key: DecodingKey, alg: &str) -> Self {
         self.verifying = Some(KeyWithAlg {
             key,
@@ -79,6 +132,10 @@ impl SDJWTCryptoProviderBuiltin {
         self
     }
 
+    /// Restrict the JWS algorithms accepted when verifying Key Binding JWTs,
+    /// independently of the Issuer-JWT algorithm. Default: any asymmetric
+    /// algorithm `jsonwebtoken` supports. Symmetric (`HS*`) entries are
+    /// ineffective — `verify` rejects them regardless.
     pub fn with_allowed_key_binding_algs(mut self, algs: &[&str]) -> Self {
         self.allowed_key_binding_algs = Some(algs.iter().map(|s| s.to_string()).collect());
         self
@@ -99,6 +156,11 @@ impl SDJWTCryptoProvider for SDJWTCryptoProviderBuiltin {
             .ok_or(Error::KeyNotFound("no signing key configured".to_string()))
     }
 
+    /// [SignatureRole::IssuerJwt]: exactly the pinned algorithm.
+    /// [SignatureRole::KeyBindingJwt]: the configured
+    /// [Self::with_allowed_key_binding_algs] list, or by default any
+    /// asymmetric algorithm `jsonwebtoken` supports (the in-band `cnf` key
+    /// cannot be pinned ahead of time).
     fn allowed_verifying_algs(&self, role: SignatureRole) -> Result<Vec<String>> {
         match role {
             SignatureRole::IssuerJwt => {
