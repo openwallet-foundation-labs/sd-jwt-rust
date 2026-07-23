@@ -20,9 +20,9 @@ use crate::disclosure::SDJWTDisclosure;
 use crate::error::Error;
 use crate::utils::{base64_hash, generate_salt};
 use crate::{
-    SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
-    DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
-    SDJWTSerializationFormat,
+    SDJWTCommon, SDJWTSerializationFormat, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+    DEFAULT_DIGEST_ALG, DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY,
+    SD_LIST_PREFIX,
 };
 
 pub struct SDJWTIssuer {
@@ -89,13 +89,12 @@ impl<'a> ClaimsForSelectiveDisclosureStrategy<'a> {
                 let next_sd_keys = sd_keys
                     .iter()
                     .filter_map(|str| {
-                        str.strip_prefix(key).and_then(|str|
-                            match str.chars().next() {
+                        str.strip_prefix(key)
+                            .and_then(|str| match str.chars().next() {
                                 Some('.') => Some(&str[1..]), // next token
                                 Some('[') => Some(str),       // array index
                                 _ => None,
-                            }
-                        )
+                            })
                     })
                     .collect();
                 Self::Custom(next_sd_keys)
@@ -226,7 +225,11 @@ impl SDJWTIssuer {
         Ok(())
     }
 
-    fn create_sd_claims(&mut self, user_claims: &Value, sd_strategy: ClaimsForSelectiveDisclosureStrategy) -> Value {
+    fn create_sd_claims(
+        &mut self,
+        user_claims: &Value,
+        sd_strategy: ClaimsForSelectiveDisclosureStrategy,
+    ) -> Value {
         match user_claims {
             Value::Array(list) => self.create_sd_claims_list(list, sd_strategy),
             Value::Object(object) => self.create_sd_claims_object(object, sd_strategy),
@@ -234,7 +237,11 @@ impl SDJWTIssuer {
         }
     }
 
-    fn create_sd_claims_list(&mut self, list: &[Value], sd_strategy: ClaimsForSelectiveDisclosureStrategy) -> Value {
+    fn create_sd_claims_list(
+        &mut self,
+        list: &[Value],
+        sd_strategy: ClaimsForSelectiveDisclosureStrategy,
+    ) -> Value {
         let mut claims = Vec::new();
         for (idx, object) in list.iter().enumerate() {
             let key = format!("[{idx}]");
@@ -319,7 +326,7 @@ impl SDJWTIssuer {
     }
 
     fn create_combined(&mut self) -> Result<()> {
-        match self.inner.serialization_format  {
+        match self.inner.serialization_format {
             SDJWTSerializationFormat::Compact => {
                 let mut disclosures: VecDeque<String> = self
                     .all_disclosures
@@ -335,7 +342,7 @@ impl SDJWTIssuer {
                     disclosures.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR),
                     COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
                 );
-            },
+            }
             SDJWTSerializationFormat::FlattenedJson => {
                 let (protected, payload, signature) = SDJWTCommon::split_jwt(&self.signed_sd_jwt)?;
                 let header = SDJWTUnprotectedHeader {
@@ -414,13 +421,14 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims,
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         trace!("{:?}", sd_jwt)
     }
@@ -435,9 +443,15 @@ mod tests {
         ]);
 
         let next_strategy = strategy.next_level("addresses");
-        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["[1]", "[1].country"]));
+        assert_eq!(
+            &next_strategy,
+            &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["[1]", "[1].country"])
+        );
         let next_strategy = next_strategy.next_level("[1]");
-        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["country"]));
+        assert_eq!(
+            &next_strategy,
+            &ClaimsForSelectiveDisclosureStrategy::Custom(vec!["country"])
+        );
     }
 
     #[test]
@@ -450,11 +464,14 @@ mod tests {
         ]);
 
         let next_strategy = strategy.next_level("address");
-        assert_eq!(&next_strategy, &ClaimsForSelectiveDisclosureStrategy::Custom(vec![
-            "street_address",
-            "locality",
-            "region",
-            "country"
-        ]));
+        assert_eq!(
+            &next_strategy,
+            &ClaimsForSelectiveDisclosureStrategy::Custom(vec![
+                "street_address",
+                "locality",
+                "region",
+                "country"
+            ])
+        );
     }
 }

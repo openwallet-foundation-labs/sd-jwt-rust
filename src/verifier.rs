@@ -2,9 +2,9 @@
 // https://www.dsr-corporation.com
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::SDJWTSerializationFormat;
 use crate::error::Error;
 use crate::error::Result;
+use crate::SDJWTSerializationFormat;
 use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use log::debug;
@@ -17,7 +17,7 @@ use std::vec::Vec;
 
 use crate::utils::base64_hash;
 use crate::{
-    SDJWTCommon, KeyResolver, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
+    KeyResolver, SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
     DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY,
     SD_LIST_PREFIX,
 };
@@ -71,11 +71,11 @@ impl SDJWTVerifier {
         verifier.verified_claims = verifier.extract_sd_claims()?;
 
         if let (Some(expected_aud), Some(expected_nonce)) = (&expected_aud, &expected_nonce) {
-            let sign_alg = verifier.sd_jwt_engine.unverified_input_key_binding_jwt
+            let sign_alg = verifier
+                .sd_jwt_engine
+                .unverified_input_key_binding_jwt
                 .as_ref()
-                .and_then(|value| {
-                    SDJWTCommon::decode_header_and_get_sign_algorithm(value)
-                });
+                .and_then(|value| SDJWTCommon::decode_header_and_get_sign_algorithm(value));
 
             verifier.verify_key_binding_jwt(
                 expected_aud.to_owned(),
@@ -121,11 +121,7 @@ impl SDJWTVerifier {
         // `nbf` is optional too (not added to required_spec_claims), but when
         // present it must be honored; jsonwebtoken leaves `validate_nbf` off.
         validation.validate_nbf = true;
-        let claims = jsonwebtoken::decode(
-            sd_jwt,
-            &issuer_public_key,
-            &validation,
-        )
+        let claims = jsonwebtoken::decode(sd_jwt, &issuer_public_key, &validation)
             .map_err(|e| Error::DeserializationError(format!("Cannot decode jwt: {}", e)))?
             .claims;
 
@@ -204,7 +200,9 @@ impl SDJWTVerifier {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
         if !key_binding_jwt.claims.contains_key("iat") {
-            return Err(Error::InvalidInput("Missing required `iat` claim in KB-JWT".to_string()));
+            return Err(Error::InvalidInput(
+                "Missing required `iat` claim in KB-JWT".to_string(),
+            ));
         }
         let sd_hash = self._get_key_binding_digest_hash()?;
         if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
@@ -221,7 +219,7 @@ impl SDJWTVerifier {
             self.sd_jwt_engine
                 .unverified_sd_jwt
                 .as_ref()
-                .ok_or(Error::ConversionError("reference".to_string()))?
+                .ok_or(Error::ConversionError("reference".to_string()))?,
         );
         combined.extend(
             self.sd_jwt_engine
@@ -296,12 +294,8 @@ impl SDJWTVerifier {
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 Ok(sd_jwt_claims.to_owned())
             }
-            Value::Array(arr) => {
-                self.unpack_disclosed_claims_in_array(arr)
-            }
-            Value::Object(obj) => {
-                self.unpack_disclosed_claims_in_object(obj)
-            }
+            Value::Array(arr) => self.unpack_disclosed_claims_in_array(arr),
+            Value::Object(obj) => self.unpack_disclosed_claims_in_object(obj),
         }
     }
 
@@ -314,13 +308,13 @@ impl SDJWTVerifier {
 
         let mut claims = vec![];
         for value in arr {
-
             match value {
                 // case for SD objects in arrays
                 Value::Object(obj) if obj.contains_key(SD_LIST_PREFIX) => {
                     if obj.len() > 1 {
                         return Err(Error::InvalidDisclosure(
-                            "Disclosed claim object in an array maust contain only one key".to_string(),
+                            "Disclosed claim object in an array maust contain only one key"
+                                .to_string(),
                         ));
                     }
 
@@ -329,17 +323,20 @@ impl SDJWTVerifier {
                     if let Some(disclosed_claim) = disclosed_claim {
                         claims.push(disclosed_claim);
                     }
-                },
+                }
                 _ => {
                     let claim = self.unpack_disclosed_claims(value)?;
                     claims.push(claim);
-                },
+                }
             }
         }
         Ok(Value::Array(claims))
     }
 
-    fn unpack_disclosed_claims_in_object(&mut self, nested_sd_jwt_claims: &Map<String, Value>) -> Result<Value> {
+    fn unpack_disclosed_claims_in_object(
+        &mut self,
+        nested_sd_jwt_claims: &Map<String, Value>,
+    ) -> Result<Value> {
         let mut disclosed_claims: Map<String, Value> = serde_json::Map::new();
 
         for (key, value) in nested_sd_jwt_claims {
@@ -409,10 +406,7 @@ impl SDJWTVerifier {
         Ok(())
     }
 
-    fn unpack_from_digest(
-        &mut self,
-        digest: &Value,
-    ) -> Result<Option<Value>> {
+    fn unpack_from_digest(&mut self, digest: &Value) -> Result<Option<Value>> {
         let digest = digest
             .as_str()
             .ok_or(Error::ConversionError("str".to_string()))?;
@@ -421,9 +415,7 @@ impl SDJWTVerifier {
         }
         self.duplicate_hash_check.push(digest.to_string());
 
-        if let Some(value_for_digest) =
-            self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest)
-        {
+        if let Some(value_for_digest) = self.sd_jwt_engine.hash_to_decoded_disclosure.get(digest) {
             let disclosure =
                 value_for_digest
                     .as_array()
@@ -452,7 +444,10 @@ impl SDJWTVerifier {
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::utils::{base64url_decode, base64url_encode};
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTVerifier, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
+    use crate::{
+        SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat,
+        SDJWTVerifier, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+    };
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
     use rstest::rstest;
     use serde_json::{json, Map, Value};
@@ -519,28 +514,29 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::Compact,
             Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
         )
-            .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
@@ -552,8 +548,8 @@ mod tests {
             None,
             SDJWTSerializationFormat::Compact,
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
         assert_eq!(user_claims, verified_claims);
     }
 
@@ -573,25 +569,27 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
-            .unwrap();
-
-        let presentation = SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::Compact)
-            .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
                 None,
-                None,
-                None,
-                None,
+                false,
+                SDJWTSerializationFormat::Compact,
             )
             .unwrap();
+
+        let presentation =
+            SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::Compact)
+                .unwrap()
+                .create_presentation(
+                    user_claims.as_object().unwrap().clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
@@ -603,8 +601,8 @@ mod tests {
             None,
             SDJWTSerializationFormat::Compact,
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
         assert_eq!(user_claims, verified_claims);
     }
 
@@ -645,13 +643,14 @@ mod tests {
             "$.addresses[1].country",
             "$.nationalities[0]",
         ]);
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            strategy,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                strategy,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
 
         let mut claims_to_disclose = user_claims.clone();
@@ -679,8 +678,8 @@ mod tests {
             None,
             SDJWTSerializationFormat::Compact,
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
 
         let expected_verified_claims = json!(
             {
@@ -742,13 +741,14 @@ mod tests {
             "$.test2[0]",
             "$.test2[1]",
         ]);
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            strategy,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                strategy,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
 
         let claims_to_disclose = json!({});
@@ -774,8 +774,8 @@ mod tests {
             None,
             SDJWTSerializationFormat::Compact,
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
 
         let expected_verified_claims = json!(
             {
@@ -795,7 +795,6 @@ mod tests {
 
     #[test]
     fn verify_full_presentation_to_allow_other_algorithms() {
-
         let user_claims = json!({
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
             "iss": "https://example.com/issuer",
@@ -810,29 +809,32 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_ED25519_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ed_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("EdDSA".to_string())).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("EdDSA".to_string()))
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            )
             .unwrap();
-       
+
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
-            Box::new(|_, _| DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap()),
+            Box::new(|_, _| {
+                DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap()
+            }),
         )
-            .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None
-            )
-            .unwrap();
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
@@ -844,13 +846,12 @@ mod tests {
             None,
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
         assert_eq!(user_claims, verified_claims);
     }
     #[test]
     fn verify_presentation_when_sd_jwt_uses_es256_and_key_binding_uses_eddsa() {
-
         let user_claims = json!({
             "address": {
                 "street_address": "Schulstr. 12",
@@ -870,13 +871,15 @@ mod tests {
 
         let mut issuer = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()));
 
-        let sd_jwt = issuer.issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
-            false,
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
-        ).unwrap();
+        let sd_jwt = issuer
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            )
+            .unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
         let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
@@ -884,13 +887,16 @@ mod tests {
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let mut holder = SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::FlattenedJson).unwrap(); // Changed to Flattened Json format
-        let presentation = holder.create_presentation(
+        let mut holder =
+            SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::FlattenedJson)
+                .unwrap(); // Changed to Flattened Json format
+        let presentation = holder
+            .create_presentation(
                 user_claims.as_object().unwrap().clone(),
                 nonce.clone(),
                 aud.clone(),
                 Some(holder_key),
-                Some("EdDSA".to_string())
+                Some("EdDSA".to_string()),
             )
             .unwrap();
         let verified_claims = SDJWTVerifier::new(
@@ -903,8 +909,8 @@ mod tests {
             nonce.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
         )
-            .unwrap()
-            .verified_claims;
+        .unwrap()
+        .verified_claims;
 
         let claims_to_check = json!({
             "iss": user_claims["iss"].clone(),
@@ -943,13 +949,15 @@ mod tests {
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
 
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string())).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
-            false,
-            format.clone(),
-        ).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                format.clone(),
+            )
+            .unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
         let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
@@ -983,14 +991,18 @@ mod tests {
             }
             SDJWTSerializationFormat::GeneralJson => {
                 let mut json: SDJWTGeneralJson = serde_json::from_str(&presentation).unwrap();
-                json.signatures[0].header.disclosures.push(injected_disclosure);
+                json.signatures[0]
+                    .header
+                    .disclosures
+                    .push(injected_disclosure);
                 serde_json::to_string(&json).unwrap()
             }
             SDJWTSerializationFormat::Compact => {
                 // presentation = "<jwt>~<disclosures…>~<kb_jwt>"; splice the extra
                 // disclosure in just before the trailing KB-JWT segment.
-                let mut parts: Vec<&str> =
-                    presentation.split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR).collect();
+                let mut parts: Vec<&str> = presentation
+                    .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+                    .collect();
                 parts.insert(parts.len() - 1, &injected_disclosure);
                 parts.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             }
@@ -1073,29 +1085,32 @@ mod tests {
 
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string())).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
-            false,
-            SDJWTSerializationFormat::FlattenedJson,
-        ).unwrap();
+        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::FlattenedJson,
+            )
+            .unwrap();
 
         let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
         let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::FlattenedJson)
-            .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                nonce.clone(),
-                aud.clone(),
-                Some(holder_key),
-                Some("EdDSA".to_string()),
-            )
-            .unwrap();
+        let presentation =
+            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::FlattenedJson)
+                .unwrap()
+                .create_presentation(
+                    user_claims.as_object().unwrap().clone(),
+                    nonce.clone(),
+                    aud.clone(),
+                    Some(holder_key),
+                    Some("EdDSA".to_string()),
+                )
+                .unwrap();
 
         // Tamper: re-sign the KB-JWT with the `iat` claim stripped from the
         // payload. The KB-JWT remains validly signed by the holder key, so
@@ -1105,16 +1120,13 @@ mod tests {
         let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
         let kb_parts: Vec<&str> = original_kb_jwt.split('.').collect();
         let payload_bytes = base64url_decode(kb_parts[1]).unwrap();
-        let mut kb_payload: Map<String, Value> =
-            serde_json::from_slice(&payload_bytes).unwrap();
+        let mut kb_payload: Map<String, Value> = serde_json::from_slice(&payload_bytes).unwrap();
         kb_payload.remove("iat");
 
-        let resign_key =
-            EncodingKey::from_ed_pem(HOLDER_KEY_ED25519.as_bytes()).unwrap();
+        let resign_key = EncodingKey::from_ed_pem(HOLDER_KEY_ED25519.as_bytes()).unwrap();
         let mut header = Header::new(Algorithm::EdDSA);
         header.typ = Some(crate::KB_JWT_TYP_HEADER.to_string());
-        let tampered_kb_jwt =
-            jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
+        let tampered_kb_jwt = jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
 
         json.header.kb_jwt = Some(tampered_kb_jwt);
         let tampered_presentation = serde_json::to_string(&json).unwrap();
@@ -1188,7 +1200,10 @@ mod tests {
             None,
             SDJWTSerializationFormat::Compact,
         );
-        assert!(result.is_ok(), "verifier rejected an SD-JWT with a past `nbf`");
+        assert!(
+            result.is_ok(),
+            "verifier rejected an SD-JWT with a past `nbf`"
+        );
     }
 
     #[test]
@@ -1207,13 +1222,14 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
@@ -1230,12 +1246,8 @@ mod tests {
         // legitimate disclosures still hash and unpack normally; only the
         // injected disclosure is not referenced by any digest in the
         // Issuer-signed JWT, so the verifier must reject per draft-07 §8.1.
-        let injected = base64url_encode(
-            br#"["unreferencedsalt", "unreferenced_claim", "value"]"#,
-        );
-        let presentation = presentation.trim_end_matches(
-            COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
-        );
+        let injected = base64url_encode(br#"["unreferencedsalt", "unreferenced_claim", "value"]"#);
+        let presentation = presentation.trim_end_matches(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
         let tampered = format!(
             "{}{}{}{}",
             presentation,

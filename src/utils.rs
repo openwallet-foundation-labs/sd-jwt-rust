@@ -60,7 +60,7 @@ pub(crate) fn jwt_payload_decode(b64data: &str) -> Result<serde_json::Map<String
         &String::from_utf8(
             base64url_decode(b64data).map_err(|e| DeserializationError(e.to_string()))?,
         )
-            .map_err(|e| DeserializationError(e.to_string()))?,
+        .map_err(|e| DeserializationError(e.to_string()))?,
     )
-        .map_err(|e| DeserializationError(e.to_string()))
+    .map_err(|e| DeserializationError(e.to_string()))
 }
