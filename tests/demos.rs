@@ -22,6 +22,10 @@ use std::collections::HashSet;
 
 mod utils;
 
+fn issuer_key_resolver() -> Box<sd_jwt_rs::KeyResolver> {
+    Box::new(|_, _| DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap())
+}
+
 #[fixture]
 fn issuer_key() -> EncodingKey {
     let private_issuer_bytes = ISSUER_KEY.as_bytes();
@@ -330,12 +334,8 @@ fn demo_positive_cases(
         )
         .unwrap();
     let issued = sd_jwt.clone();
-    let mut holder = SDJWTHolder::new(
-        sd_jwt.clone(),
-        format.clone(),
-        Box::new(|_, _| DecodingKey::from_ec_pem(ISSUER_PUBLIC_KEY.as_bytes()).unwrap()),
-    )
-    .unwrap();
+    let mut holder =
+        SDJWTHolder::new(sd_jwt.clone(), format.clone(), issuer_key_resolver()).unwrap();
     // Holder creates presentation.
     let presentation = holder
         .create_presentation(
@@ -416,10 +416,7 @@ fn demo_positive_cases(
     // Verify presentation
     let _verified = SDJWTVerifier::new(
         presentation.clone(),
-        Box::new(|_, _| {
-            let public_issuer_bytes = ISSUER_PUBLIC_KEY.as_bytes();
-            DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-        }),
+        issuer_key_resolver(),
         aud,
         nonce,
         format,

@@ -468,6 +468,14 @@ mod tests {
         "x": "24QLWXJ18wtbg3k_MDGhGM17Xh39UftuxbwJZzRLzkA"
     }"#;
 
+    fn issuer_key_resolver() -> Box<crate::KeyResolver> {
+        Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap())
+    }
+
+    fn issuer_key_resolver_ed25519() -> Box<crate::KeyResolver> {
+        Box::new(|_, _| DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap())
+    }
+
     #[test]
     fn reject_sd_jwt_with_nested_sd_alg() {
         let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
@@ -484,7 +492,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -526,7 +534,7 @@ mod tests {
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::Compact,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
         )
         .unwrap()
         .create_presentation(
@@ -540,10 +548,7 @@ mod tests {
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -593,10 +598,7 @@ mod tests {
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -670,10 +672,7 @@ mod tests {
 
         let verified_claims = SDJWTVerifier::new(
             presentation.clone(),
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -766,10 +765,7 @@ mod tests {
 
         let verified_claims = SDJWTVerifier::new(
             presentation.clone(),
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -822,9 +818,7 @@ mod tests {
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
-            Box::new(|_, _| {
-                DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap()
-            }),
+            issuer_key_resolver_ed25519(),
         )
         .unwrap()
         .create_presentation(
@@ -838,10 +832,7 @@ mod tests {
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
             presentation,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_ED25519_PEM.as_bytes();
-                DecodingKey::from_ed_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver_ed25519(),
             None,
             None,
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
@@ -901,10 +892,7 @@ mod tests {
             .unwrap();
         let verified_claims = SDJWTVerifier::new(
             presentation,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             aud.clone(),
             nonce.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
@@ -1008,16 +996,8 @@ mod tests {
             }
         };
 
-        let result = SDJWTVerifier::new(
-            tampered,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
-            aud,
-            nonce,
-            format.clone(),
-        );
+        let result =
+            SDJWTVerifier::new(tampered, issuer_key_resolver(), aud, nonce, format.clone());
 
         assert!(
             result.is_err(),
@@ -1053,10 +1033,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             tampered,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::GeneralJson,
@@ -1133,10 +1110,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             tampered_presentation,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             aud,
             nonce,
             SDJWTSerializationFormat::FlattenedJson,
@@ -1164,7 +1138,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1195,7 +1169,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1258,10 +1232,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             tampered,
-            Box::new(|_, _| {
-                let public_issuer_bytes = PUBLIC_ISSUER_PEM.as_bytes();
-                DecodingKey::from_ec_pem(public_issuer_bytes).unwrap()
-            }),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1304,7 +1275,7 @@ mod tests {
             .unwrap();
         let result = SDJWTVerifier::new(
             presentation,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1335,7 +1306,7 @@ mod tests {
 
             let result = SDJWTVerifier::new(
                 sd_jwt,
-                Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+                issuer_key_resolver(),
                 None,
                 None,
                 SDJWTSerializationFormat::Compact,
@@ -1369,7 +1340,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1404,7 +1375,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1436,7 +1407,7 @@ mod tests {
 
         let result = SDJWTVerifier::new(
             sd_jwt,
-            Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()),
+            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
