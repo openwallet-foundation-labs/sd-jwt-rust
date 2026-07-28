@@ -162,5 +162,5 @@ pub const W3C_VC_JSONPATH: [&str; 9] = [
     "$.credentialSubject.birthdate",
     "$.credentialSubject.is_over_18",
     "$.credentialSubject.is_over_21",
-    "$.credentialSubject.is_over_65"
+    "$.credentialSubject.is_over_65",
 ];

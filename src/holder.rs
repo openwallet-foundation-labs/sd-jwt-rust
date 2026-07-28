@@ -51,7 +51,11 @@ impl SDJWTHolder {
         serialization_format: SDJWTSerializationFormat,
         cb_get_issuer_key: Box<KeyResolver>,
     ) -> Result<Self> {
-        Self::build(sd_jwt_with_disclosures, serialization_format, Some(cb_get_issuer_key))
+        Self::build(
+            sd_jwt_with_disclosures,
+            serialization_format,
+            Some(cb_get_issuer_key),
+        )
     }
 
     /// Like [`SDJWTHolder::new`], but skips Issuer-signature verification —
@@ -103,8 +107,7 @@ impl SDJWTHolder {
             .is_some()
         {
             return Err(Error::InvalidInput(
-                "Holder received an SD-JWT+KB; a Key Binding JWT must not be present"
-                    .to_string(),
+                "Holder received an SD-JWT+KB; a Key Binding JWT must not be present".to_string(),
             ));
         }
 
@@ -334,9 +337,8 @@ impl SDJWTHolder {
                                 Value::Array(claim_to_disclose),
                                 Some(Value::Array(sd_jwt_claims)),
                             ) => {
-                                hash_to_disclosure.push(
-                                    self.sd_jwt_engine.hash_to_disclosure[digest].clone()
-                                );
+                                hash_to_disclosure
+                                    .push(self.sd_jwt_engine.hash_to_disclosure[digest].clone());
                                 hash_to_disclosure.append(
                                     &mut self.select_disclosures_from_disclosed_list(
                                         sd_jwt_claims,
@@ -402,8 +404,7 @@ impl SDJWTHolder {
         self.set_key_binding_digest_key()?;
         // Create key-binding jwt
         let mut header = Header::new(
-            Algorithm::from_str(&alg)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?,
+            Algorithm::from_str(&alg).map_err(|e| Error::DeserializationError(e.to_string()))?,
         );
         header.typ = Some(KB_JWT_TYP_HEADER.into());
         self.serialized_key_binding_jwt =
@@ -431,7 +432,9 @@ impl SDJWTHolder {
 #[cfg(test)]
 mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
-    use crate::{SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR};
+    use crate::{
+        SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+    };
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
     use serde_json::{json, Map, Value};
     use std::collections::HashSet;
@@ -669,28 +672,29 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         let presentation = SDJWTHolder::new(
             sd_jwt.clone(),
             SDJWTSerializationFormat::Compact,
             issuer_key_resolver(),
         )
-            .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(sd_jwt, presentation);
     }
     #[test]
@@ -710,27 +714,31 @@ mod tests {
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
 
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         let issued = sd_jwt.clone();
         user_claims["address"] = Value::Object(Map::new());
-        let presentation =
-            SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact, issuer_key_resolver())
-                .unwrap()
-                .create_presentation(
-                    user_claims.as_object().unwrap().clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
+        let presentation = SDJWTHolder::new(
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+            issuer_key_resolver(),
+        )
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let mut parts: Vec<&str> = issued
             .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
@@ -778,13 +786,14 @@ mod tests {
 
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None).issue_sd_jwt(
-            user_claims.clone(),
-            strategy,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+            .issue_sd_jwt(
+                user_claims.clone(),
+                strategy,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
             .unwrap();
         // Choose what to reveal
         user_claims["addresses"] = Value::Array(vec![Value::Bool(true), Value::Bool(false)]);
@@ -792,17 +801,16 @@ mod tests {
 
         let issued = sd_jwt.clone();
         println!("{}", issued);
-        let presentation =
-            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
-                .unwrap()
-                .create_presentation(
-                    user_claims.as_object().unwrap().clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
+        let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
+            .unwrap()
+            .create_presentation(
+                user_claims.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         println!("{}", presentation);
         let mut issued_parts: HashSet<&str> = issued
             .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
@@ -913,25 +921,26 @@ mod tests {
               }
         );
 
-        let presentation =
-            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
-                .unwrap()
-                .create_presentation(
-                    revealed.as_object().unwrap().clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
+        let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
+            .unwrap()
+            .create_presentation(
+                revealed.as_object().unwrap().clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let presentation: HashSet<_> = presentation
-            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR).map(String::from)
+            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .map(String::from)
             .collect();
 
         let expected: HashSet<_> = expected_presentation
             .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
-            .map(String::from).collect();
+            .map(String::from)
+            .collect();
 
         assert_eq!(presentation, expected);
     }
