@@ -5,40 +5,47 @@
 use crate::error::Error;
 use crate::error::Result;
 use crate::SDJWTSerializationFormat;
-use jsonwebtoken::jwk::Jwk;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use log::debug;
 use serde_json::{Map, Value};
 use std::ops::Add;
 use std::option::Option;
-use std::str::FromStr;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::utils::base64_hash;
+use crate::crypto_provider::{SDJWTCryptoProvider, SDJWTKeyRequest, SDJWTSignatureRole};
+use crate::utils::{base64_hash, now_seconds, numeric_date};
 use crate::{
-    KeyResolver, SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
-    DEFAULT_SIGNING_ALG, DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY,
-    SD_LIST_PREFIX,
+    SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
+    DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY, SD_LIST_PREFIX,
 };
+
+/// RFC 7519 `aud` matching: the token's `aud` may be a single string or an
+/// array of strings, and matches when `expected` is that string or a member.
+fn aud_matches(aud: Option<&Value>, expected: &str) -> bool {
+    match aud {
+        Some(Value::String(s)) => s == expected,
+        Some(Value::Array(items)) => items.iter().any(|item| item.as_str() == Some(expected)),
+        _ => false,
+    }
+}
 
 pub struct SDJWTVerifier {
     sd_jwt_engine: SDJWTCommon,
 
     sd_jwt_payload: Map<String, Value>,
-    _holder_public_key_payload: Option<Map<String, Value>>,
+    holder_public_key_payload: Option<Map<String, Value>>,
     duplicate_hash_check: Vec<String>,
     pub verified_claims: Value,
 
-    cb_get_issuer_key: Box<KeyResolver>,
+    crypto_provider: Box<dyn SDJWTCryptoProvider>,
 }
 
 impl SDJWTVerifier {
     /// Create a new SDJWTVerifier instance.
     ///
     /// # Arguments
+    /// * `crypto_provider` - A crypto provider that verifies signatures; key selection and trust are its responsibility, see [SDJWTKeyRequest].
     /// * `sd_jwt_presentation` - The SD-JWT presentation to verify.
-    /// * `cb_get_issuer_key` - A callback function that takes the issuer and the header of the SD-JWT and returns the public key of the issuer.
     /// * `expected_aud` - The expected audience of the SD-JWT.
     /// * `expected_nonce` - The expected nonce of the SD-JWT.
     /// * `serialization_format` - The serialization format of the SD-JWT, see [SDJWTSerializationFormat].
@@ -46,17 +53,23 @@ impl SDJWTVerifier {
     /// # Returns
     /// * `SDJWTVerifier` - The SDJWTVerifier instance. The verified claims can be accessed via the `verified_claims` property.
     pub fn new(
+        crypto_provider: Box<dyn SDJWTCryptoProvider>,
         sd_jwt_presentation: String,
-        cb_get_issuer_key: Box<KeyResolver>,
         expected_aud: Option<String>,
         expected_nonce: Option<String>,
         serialization_format: SDJWTSerializationFormat,
     ) -> Result<Self> {
+        if expected_aud.is_some() != expected_nonce.is_some() {
+            return Err(Error::InvalidInput(
+                "Either both expected_aud and expected_nonce must be provided or both must be None"
+                    .to_string(),
+            ));
+        }
         let mut verifier = SDJWTVerifier {
             sd_jwt_payload: serde_json::Map::new(),
-            _holder_public_key_payload: None,
+            holder_public_key_payload: None,
             duplicate_hash_check: Vec::new(),
-            cb_get_issuer_key,
+            crypto_provider,
             sd_jwt_engine: SDJWTCommon {
                 serialization_format,
                 ..Default::default()
@@ -66,85 +79,25 @@ impl SDJWTVerifier {
 
         verifier.sd_jwt_engine.parse_sd_jwt(sd_jwt_presentation)?;
         verifier.sd_jwt_engine.create_hash_mappings()?;
-        let sign_alg = verifier.sd_jwt_engine.sign_alg.clone();
-        verifier.verify_sd_jwt(sign_alg.clone())?;
+        verifier.sd_jwt_payload = verifier
+            .sd_jwt_engine
+            .process_issuer_jwt(Some(verifier.crypto_provider.as_ref()))?;
+        verifier.holder_public_key_payload = verifier
+            .sd_jwt_payload
+            .get(CNF_KEY)
+            .and_then(Value::as_object)
+            .cloned();
         verifier.verified_claims = verifier.extract_sd_claims()?;
 
-        if let (Some(expected_aud), Some(expected_nonce)) = (&expected_aud, &expected_nonce) {
-            let sign_alg = verifier
-                .sd_jwt_engine
-                .unverified_input_key_binding_jwt
-                .as_ref()
-                .and_then(|value| SDJWTCommon::decode_header_and_get_sign_algorithm(value));
-
-            verifier.verify_key_binding_jwt(
-                expected_aud.to_owned(),
-                expected_nonce.to_owned(),
-                sign_alg.as_deref(),
-            )?;
-        } else if expected_aud.is_some() || expected_nonce.is_some() {
-            return Err(Error::InvalidInput(
-                "Either both expected_aud and expected_nonce must be provided or both must be None"
-                    .to_string(),
-            ));
+        if let (Some(expected_aud), Some(expected_nonce)) = (expected_aud, expected_nonce) {
+            verifier.verify_key_binding_jwt(expected_aud, expected_nonce)?;
         }
 
         Ok(verifier)
     }
 
-    fn verify_sd_jwt(&mut self, sign_alg: Option<String>) -> Result<()> {
-        let sd_jwt = self
-            .sd_jwt_engine
-            .unverified_sd_jwt
-            .as_ref()
-            .ok_or(Error::ConversionError("reference".to_string()))?;
-        let parsed_header_sd_jwt = jsonwebtoken::decode_header(sd_jwt)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
-
-        let unverified_issuer = self
-            .sd_jwt_engine
-            .unverified_input_sd_jwt_payload
-            .as_ref()
-            .ok_or(Error::ConversionError("reference".to_string()))?["iss"]
-            .as_str()
-            .ok_or(Error::ConversionError("str".to_string()))?;
-        let issuer_public_key = (self.cb_get_issuer_key)(unverified_issuer, &parsed_header_sd_jwt);
-        let algorithm: Algorithm = match sign_alg {
-            Some(alg_str) => Algorithm::from_str(&alg_str)
-                .map_err(|e| Error::DeserializationError(e.to_string()))?,
-            None => Algorithm::ES256, // Default or handle as needed
-        };
-        let mut validation = Validation::new(algorithm);
-        // RFC 9901 §4.1: `exp` is not mandated, so don't require it. `validate_exp`
-        // stays true, so a present `exp` is still checked for expiry.
-        validation.required_spec_claims.remove("exp");
-        // `nbf` is optional too (not added to required_spec_claims), but when
-        // present it must be honored; jsonwebtoken leaves `validate_nbf` off.
-        validation.validate_nbf = true;
-        let claims = jsonwebtoken::decode(sd_jwt, &issuer_public_key, &validation)
-            .map_err(|e| Error::DeserializationError(format!("Cannot decode jwt: {}", e)))?
-            .claims;
-
-        let _ = sign_alg; //FIXME check algo
-
-        self.sd_jwt_payload = claims;
-        self._holder_public_key_payload = self
-            .sd_jwt_payload
-            .get(CNF_KEY)
-            .and_then(Value::as_object)
-            .cloned();
-
-        Ok(())
-    }
-
-    fn verify_key_binding_jwt(
-        &mut self,
-        expected_aud: String,
-        expected_nonce: String,
-        sign_alg: Option<&str>,
-    ) -> Result<()> {
-        let sign_alg = sign_alg.unwrap_or(DEFAULT_SIGNING_ALG);
-        let holder_public_key_payload_jwk = match &self._holder_public_key_payload {
+    fn verify_key_binding_jwt(&self, expected_aud: String, expected_nonce: String) -> Result<()> {
+        let holder_public_key_payload_jwk = match &self.holder_public_key_payload {
             None => {
                 return Err(Error::KeyNotFound(
                     "No holder public key in SD-JWT".to_string(),
@@ -158,61 +111,61 @@ impl SDJWTVerifier {
                 }
             }
         };
-        let pubkey: DecodingKey = match serde_json::from_value::<Jwk>(holder_public_key_payload_jwk)
-        {
-            Ok(jwk) => {
-                if let Ok(pubkey) = DecodingKey::from_jwk(&jwk) {
-                    pubkey
-                } else {
-                    return Err(Error::DeserializationError(
-                        "Cannot parse DecodingKey from json".to_string(),
-                    ));
-                }
-            }
-            Err(_) => {
-                return Err(Error::DeserializationError(
-                    "Cannot parse JWK from json".to_string(),
-                ));
-            }
-        };
-        let key_binding_jwt = match &self.sd_jwt_engine.unverified_input_key_binding_jwt {
-            Some(payload) => {
-                let mut validation = Validation::new(
-                    Algorithm::from_str(sign_alg)
-                        .map_err(|e| Error::DeserializationError(e.to_string()))?,
-                );
-                validation.set_audience(&[&expected_aud]);
-                validation.set_required_spec_claims(&["aud"]);
-
-                jsonwebtoken::decode::<Map<String, Value>>(&payload, &pubkey, &validation)
-                    .map_err(|e| Error::DeserializationError(e.to_string()))?
-            }
-            None => {
-                return Err(Error::InvalidState(
-                    "Cannot take Key Binding JWK from String".to_string(),
-                ));
-            }
-        };
-        if key_binding_jwt.header.typ != Some(KB_JWT_TYP_HEADER.to_string()) {
+        let jwk_json = serde_json::to_string(&holder_public_key_payload_jwk)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let key_binding_jwt = self
+            .sd_jwt_engine
+            .unverified_input_key_binding_jwt
+            .as_ref()
+            .ok_or(Error::InvalidState(
+                "Cannot take Key Binding JWK from String".to_string(),
+            ))?;
+        let header = SDJWTCommon::parse_protected_header(key_binding_jwt)?;
+        if header.typ() != Some(KB_JWT_TYP_HEADER) {
             return Err(Error::InvalidInput("Invalid header type".to_string()));
         }
-        if key_binding_jwt.claims.get("nonce") != Some(&Value::String(expected_nonce)) {
+        let request = SDJWTKeyRequest {
+            role: SDJWTSignatureRole::KeyBindingJwt,
+            iss: None,
+            kid: header.kid().map(str::to_owned),
+            alg: header.alg().to_owned(),
+            x5c: header.x5c_der()?,
+            jwk: Some(jwk_json),
+        };
+        let claims = SDJWTCommon::verify_compact_jws(
+            key_binding_jwt,
+            &request,
+            self.crypto_provider.as_ref(),
+        )?;
+        SDJWTCommon::validate_temporal(&claims)?;
+        if claims.get("nonce") != Some(&Value::String(expected_nonce)) {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
-        if !key_binding_jwt.claims.contains_key("iat") {
+        if !aud_matches(claims.get("aud"), &expected_aud) {
             return Err(Error::InvalidInput(
-                "Missing required `iat` claim in KB-JWT".to_string(),
+                "Invalid audience in KB-JWT".to_string(),
             ));
         }
-        let sd_hash = self._get_key_binding_digest_hash()?;
-        if key_binding_jwt.claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
+        // The KB-JWT `iat` must be present, numeric, and not in the future; a
+        // past-side max-age window is left to the application.
+        const IAT_LEEWAY_SECONDS: u64 = 60;
+        let iat = numeric_date(&claims, "iat")?.ok_or_else(|| {
+            Error::InvalidInput("Missing required `iat` claim in KB-JWT".to_string())
+        })?;
+        if iat > now_seconds()?.saturating_add(IAT_LEEWAY_SECONDS) as f64 {
+            return Err(Error::InvalidInput(
+                "Key Binding JWT `iat` is in the future".to_string(),
+            ));
+        }
+        let sd_hash = self.key_binding_digest_hash()?;
+        if claims.get(KB_DIGEST_KEY) != Some(&Value::String(sd_hash)) {
             return Err(Error::InvalidInput("Invalid digest in KB-JWT".to_string()));
         }
 
         Ok(())
     }
 
-    fn _get_key_binding_digest_hash(&mut self) -> Result<String> {
+    fn key_binding_digest_hash(&self) -> Result<String> {
         let mut combined: Vec<&str> =
             Vec::with_capacity(self.sd_jwt_engine.input_disclosures.len() + 1);
         combined.push(
@@ -468,17 +421,180 @@ mod tests {
         "x": "24QLWXJ18wtbg3k_MDGhGM17Xh39UftuxbwJZzRLzkA"
     }"#;
 
-    fn issuer_key_resolver() -> Box<crate::KeyResolver> {
-        Box::new(|_, _| DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap())
+    #[test]
+    fn aud_matches_accepts_string_and_array_forms() {
+        use super::aud_matches;
+        assert!(aud_matches(
+            Some(&json!("https://verifier.example")),
+            "https://verifier.example"
+        ));
+        // RFC 7519 array form containing the expected audience.
+        assert!(aud_matches(
+            Some(&json!(["https://other", "https://verifier.example"])),
+            "https://verifier.example"
+        ));
+        assert!(!aud_matches(
+            Some(&json!("https://other")),
+            "https://verifier.example"
+        ));
+        assert!(!aud_matches(Some(&json!([])), "https://verifier.example"));
+        assert!(!aud_matches(None, "https://verifier.example"));
     }
 
-    fn issuer_key_resolver_ed25519() -> Box<crate::KeyResolver> {
-        Box::new(|_, _| DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap())
+    fn es256_signing_key() -> EncodingKey {
+        EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap()
+    }
+
+    fn es256_verifying_key() -> DecodingKey {
+        DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()
+    }
+
+    fn ed25519_signing_key() -> EncodingKey {
+        EncodingKey::from_ed_pem(PRIVATE_ISSUER_ED25519_PEM.as_bytes()).unwrap()
+    }
+
+    fn ed25519_verifying_key() -> DecodingKey {
+        DecodingKey::from_ed_pem(PUBLIC_ISSUER_ED25519_PEM.as_bytes()).unwrap()
+    }
+
+    fn holder_ed25519_signing_key() -> EncodingKey {
+        EncodingKey::from_ed_pem(HOLDER_KEY_ED25519.as_bytes()).unwrap()
+    }
+
+    fn issuer_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(crate::ALLOWED_SIGNING_ALGS, None)
+                .with_issuer_signing_key(crate::SDJWTKeyWithAlg::new(
+                    es256_signing_key(),
+                    crate::DEFAULT_SIGNING_ALG,
+                ))
+                .unwrap(),
+        )
+    }
+
+    fn issuer_crypto_provider_ed25519() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(&["EdDSA"], None)
+                .with_issuer_signing_key(crate::SDJWTKeyWithAlg::new(
+                    ed25519_signing_key(),
+                    "EdDSA",
+                ))
+                .unwrap(),
+        )
+    }
+
+    /// Verifies the (EdDSA) Issuer signature [issuer_crypto_provider_ed25519]
+    /// produces — used by both the Holder and the Verifier in the EdDSA
+    /// round-trip test.
+    fn ed25519_verifying_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(&["EdDSA"], None)
+                .with_issuer_verifying_key(crate::SDJWTKeyWithAlg::new(
+                    ed25519_verifying_key(),
+                    "EdDSA",
+                ))
+                .unwrap(),
+        )
+    }
+
+    /// Provider for a Holder in these tests: verifies the (ES256) Issuer
+    /// signature and signs the Key Binding JWT with the (EdDSA) Holder key.
+    fn holder_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["EdDSA"]))
+                .with_issuer_verifying_key(crate::SDJWTKeyWithAlg::new(
+                    es256_verifying_key(),
+                    "ES256",
+                ))
+                .unwrap()
+                .with_holder_signing_key(crate::SDJWTKeyWithAlg::new(
+                    holder_ed25519_signing_key(),
+                    "EdDSA",
+                ))
+                .unwrap(),
+        )
+    }
+
+    /// Provider for a Verifier in these tests: verifies the (ES256) Issuer
+    /// signature and accepts only the (EdDSA) Key Binding JWTs the Holder
+    /// above produces — pinned explicitly rather than relying on the
+    /// builtin's any-asymmetric-algorithm KB default.
+    fn verifier_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(crate::ALLOWED_SIGNING_ALGS, Some(&["EdDSA"]))
+                .with_issuer_verifying_key(crate::SDJWTKeyWithAlg::new(
+                    es256_verifying_key(),
+                    crate::DEFAULT_SIGNING_ALG,
+                ))
+                .unwrap(),
+        )
+    }
+
+    /// Verifier provider whose Key Binding allowlist admits only ES256, while
+    /// the test Holder signs Key Binding JWTs with EdDSA — for proving the KB
+    /// `alg` allowlist gate.
+    fn kb_es256_only_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        Box::new(
+            crate::SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["ES256"]))
+                .with_issuer_verifying_key(crate::SDJWTKeyWithAlg::new(
+                    es256_verifying_key(),
+                    "ES256",
+                ))
+                .unwrap(),
+        )
+    }
+
+    /// Crypto provider whose `verify` always fails, for exercising error
+    /// propagation from a Verifier's crypto provider.
+    fn erroring_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        struct ErroringCryptoProvider;
+        impl crate::SDJWTCryptoProvider for ErroringCryptoProvider {
+            fn verify(
+                &self,
+                _: &[u8],
+                _: &[u8],
+                _: &crate::SDJWTKeyRequest,
+            ) -> crate::error::Result<()> {
+                Err(crate::error::Error::KeyNotFound(
+                    "unknown issuer".to_string(),
+                ))
+            }
+            fn allowed_verifying_algs(
+                &self,
+                _: crate::SDJWTSignatureRole,
+            ) -> crate::error::Result<Vec<String>> {
+                Ok(vec![crate::DEFAULT_SIGNING_ALG.to_string()])
+            }
+        }
+        Box::new(ErroringCryptoProvider)
+    }
+
+    /// Provider whose allowlist admits only ES384 and whose `verify` must
+    /// never be reached — proves the library checks the allowlist first.
+    fn es384_only_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
+        struct Es384OnlyProvider;
+        impl crate::SDJWTCryptoProvider for Es384OnlyProvider {
+            fn verify(
+                &self,
+                _: &[u8],
+                _: &[u8],
+                _: &crate::SDJWTKeyRequest,
+            ) -> crate::error::Result<()> {
+                panic!("verify must not be called for a non-allowlisted alg")
+            }
+            fn allowed_verifying_algs(
+                &self,
+                _: crate::SDJWTSignatureRole,
+            ) -> crate::error::Result<Vec<String>> {
+                Ok(vec!["ES384".to_string()])
+            }
+        }
+        Box::new(Es384OnlyProvider)
     }
 
     #[test]
     fn reject_sd_jwt_with_nested_sd_alg() {
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         let payload = json!({
             "iss": "https://example.com/issuer",
             "iat": 1683000000,
@@ -491,8 +607,8 @@ mod tests {
         let sd_jwt = format!("{signed}~");
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -520,9 +636,7 @@ mod tests {
                 "country": "DE"
             }
         });
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -532,23 +646,17 @@ mod tests {
             )
             .unwrap();
         let presentation = SDJWTHolder::new(
+            verifier_crypto_provider(),
             sd_jwt.clone(),
             SDJWTSerializationFormat::Compact,
-            issuer_key_resolver(),
         )
         .unwrap()
-        .create_presentation(
-            user_claims.as_object().unwrap().clone(),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
         .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -572,9 +680,7 @@ mod tests {
                 "country": "DE"
             }
         });
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::NoSDClaims,
@@ -587,18 +693,12 @@ mod tests {
         let presentation =
             SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::Compact)
                 .unwrap()
-                .create_presentation(
-                    user_claims.as_object().unwrap().clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
                 .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -637,15 +737,13 @@ mod tests {
               ]
             }
         );
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.name",
             "$.addresses[1]",
             "$.addresses[1].country",
             "$.nationalities[0]",
         ]);
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 strategy,
@@ -661,18 +759,12 @@ mod tests {
             Value::Array(vec![Value::Bool(true), Value::Bool(true)]);
         let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
-            .create_presentation(
-                claims_to_disclose.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .create_presentation(claims_to_disclose.as_object().unwrap().clone(), None, None)
             .unwrap();
 
         let verified_claims = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation.clone(),
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -730,8 +822,6 @@ mod tests {
                 "test2": ["foo", "bar"]
             }
         );
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
         let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec![
             "$.array_with_recursive_sd[1]",
             "$.array_with_recursive_sd[1].baz",
@@ -740,7 +830,7 @@ mod tests {
             "$.test2[0]",
             "$.test2[1]",
         ]);
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 strategy,
@@ -754,18 +844,12 @@ mod tests {
 
         let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
-            .create_presentation(
-                claims_to_disclose.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .create_presentation(claims_to_disclose.as_object().unwrap().clone(), None, None)
             .unwrap();
 
         let verified_claims = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation.clone(),
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -803,9 +887,7 @@ mod tests {
                 "country": "DE"
             }
         });
-        let private_issuer_bytes = PRIVATE_ISSUER_ED25519_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ed_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("EdDSA".to_string()))
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider_ed25519())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -816,23 +898,17 @@ mod tests {
             .unwrap();
 
         let presentation = SDJWTHolder::new(
+            ed25519_verifying_crypto_provider(),
             sd_jwt.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
-            issuer_key_resolver_ed25519(),
         )
         .unwrap()
-        .create_presentation(
-            user_claims.as_object().unwrap().clone(),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
         .unwrap();
         assert_eq!(sd_jwt, presentation);
         let verified_claims = SDJWTVerifier::new(
+            ed25519_verifying_crypto_provider(),
             presentation,
-            issuer_key_resolver_ed25519(),
             None,
             None,
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
@@ -857,10 +933,7 @@ mod tests {
 
         });
 
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-
-        let mut issuer = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()));
+        let mut issuer = SDJWTIssuer::new(issuer_crypto_provider());
 
         let sd_jwt = issuer
             .issue_sd_jwt(
@@ -872,27 +945,25 @@ mod tests {
             )
             .unwrap();
 
-        let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
-        let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
-
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let mut holder =
-            SDJWTHolder::new_unverified(sd_jwt.clone(), SDJWTSerializationFormat::FlattenedJson)
-                .unwrap(); // Changed to Flattened Json format
+        let mut holder = SDJWTHolder::new(
+            holder_crypto_provider(),
+            sd_jwt.clone(),
+            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+        )
+        .unwrap();
         let presentation = holder
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
                 nonce.clone(),
                 aud.clone(),
-                Some(holder_key),
-                Some("EdDSA".to_string()),
             )
             .unwrap();
         let verified_claims = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation,
-            issuer_key_resolver(),
             aud.clone(),
             nonce.clone(),
             SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
@@ -934,10 +1005,7 @@ mod tests {
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
         });
 
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -947,19 +1015,15 @@ mod tests {
             )
             .unwrap();
 
-        let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
-        let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let presentation = SDJWTHolder::new_unverified(sd_jwt, format.clone())
+        let presentation = SDJWTHolder::new(holder_crypto_provider(), sd_jwt, format.clone())
             .unwrap()
             .create_presentation(
                 user_claims.as_object().unwrap().clone(),
                 nonce.clone(),
                 aud.clone(),
-                Some(holder_key),
-                Some("EdDSA".to_string()),
             )
             .unwrap();
 
@@ -996,8 +1060,13 @@ mod tests {
             }
         };
 
-        let result =
-            SDJWTVerifier::new(tampered, issuer_key_resolver(), aud, nonce, format.clone());
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            tampered,
+            aud,
+            nonce,
+            format.clone(),
+        );
 
         assert!(
             result.is_err(),
@@ -1013,10 +1082,7 @@ mod tests {
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
         });
 
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims,
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -1032,8 +1098,8 @@ mod tests {
         let tampered = serde_json::to_string(&json).unwrap();
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             tampered,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::GeneralJson,
@@ -1060,9 +1126,7 @@ mod tests {
             "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
         });
 
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, Some("ES256".to_string()))
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -1072,22 +1136,21 @@ mod tests {
             )
             .unwrap();
 
-        let private_holder_bytes = HOLDER_KEY_ED25519.as_bytes();
-        let holder_key = EncodingKey::from_ed_pem(private_holder_bytes).unwrap();
         let nonce = Some(String::from("testNonce"));
         let aud = Some(String::from("testAud"));
 
-        let presentation =
-            SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::FlattenedJson)
-                .unwrap()
-                .create_presentation(
-                    user_claims.as_object().unwrap().clone(),
-                    nonce.clone(),
-                    aud.clone(),
-                    Some(holder_key),
-                    Some("EdDSA".to_string()),
-                )
-                .unwrap();
+        let presentation = SDJWTHolder::new(
+            holder_crypto_provider(),
+            sd_jwt,
+            SDJWTSerializationFormat::FlattenedJson,
+        )
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            nonce.clone(),
+            aud.clone(),
+        )
+        .unwrap();
 
         // Tamper: re-sign the KB-JWT with the `iat` claim stripped from the
         // payload. The KB-JWT remains validly signed by the holder key, so
@@ -1100,7 +1163,7 @@ mod tests {
         let mut kb_payload: Map<String, Value> = serde_json::from_slice(&payload_bytes).unwrap();
         kb_payload.remove("iat");
 
-        let resign_key = EncodingKey::from_ed_pem(HOLDER_KEY_ED25519.as_bytes()).unwrap();
+        let resign_key = holder_ed25519_signing_key();
         let mut header = Header::new(Algorithm::EdDSA);
         header.typ = Some(crate::KB_JWT_TYP_HEADER.to_string());
         let tampered_kb_jwt = jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
@@ -1109,8 +1172,8 @@ mod tests {
         let tampered_presentation = serde_json::to_string(&json).unwrap();
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             tampered_presentation,
-            issuer_key_resolver(),
             aud,
             nonce,
             SDJWTSerializationFormat::FlattenedJson,
@@ -1123,6 +1186,184 @@ mod tests {
     }
 
     #[test]
+    fn reject_kb_jwt_with_future_iat() {
+        let user_claims = json!({
+            "address": {
+                "street_address": "Schulstr. 12",
+                "locality": "Schulpforta",
+                "region": "Sachsen-Anhalt",
+                "country": "DE"
+            },
+            "exp": 1883000000,
+            "iat": 1683000000,
+            "iss": "https://example.com/issuer",
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+        });
+
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::FlattenedJson,
+            )
+            .unwrap();
+
+        let nonce = Some(String::from("testNonce"));
+        let aud = Some(String::from("testAud"));
+
+        let presentation = SDJWTHolder::new(
+            holder_crypto_provider(),
+            sd_jwt,
+            SDJWTSerializationFormat::FlattenedJson,
+        )
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            nonce.clone(),
+            aud.clone(),
+        )
+        .unwrap();
+
+        // Tamper: re-sign the KB-JWT with a far-future `iat`. The signature is
+        // valid, but §7.3 requires the creation time to be within an acceptable
+        // window, so the verifier must reject it.
+        let mut json: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
+        let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
+        let kb_parts: Vec<&str> = original_kb_jwt.split('.').collect();
+        let payload_bytes = base64url_decode(kb_parts[1]).unwrap();
+        let mut kb_payload: Map<String, Value> = serde_json::from_slice(&payload_bytes).unwrap();
+        kb_payload.insert("iat".to_string(), Value::from(9999999999u64));
+
+        let resign_key = holder_ed25519_signing_key();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(crate::KB_JWT_TYP_HEADER.to_string());
+        let tampered_kb_jwt = jsonwebtoken::encode(&header, &kb_payload, &resign_key).unwrap();
+
+        json.header.kb_jwt = Some(tampered_kb_jwt);
+        let tampered_presentation = serde_json::to_string(&json).unwrap();
+
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            tampered_presentation,
+            aud,
+            nonce,
+            SDJWTSerializationFormat::FlattenedJson,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted KB-JWT presentation with a future `iat`",
+        );
+    }
+
+    #[test]
+    fn reject_forged_hs256_key_binding_jwt() {
+        // Algorithm-confusion regression test: an attacker who never sees the
+        // holder's private key should not be able to rebind a stolen
+        // presentation to an audience/nonce of their choosing. Before the
+        // fix, `SDJWTCryptoProviderBuiltin::verify` took `alg` from the
+        // (attacker-controlled) KB-JWT header at face value and passed it to
+        // `jsonwebtoken::crypto::verify`, which — unlike `jsonwebtoken::decode`
+        // — does not check that the key family matches `alg`. An EC/OKP `cnf`
+        // key parsed via `DecodingKey::from_jwk` exposes its PUBLIC key bytes
+        // via `as_bytes()`, so an attacker can compute a valid "HS256
+        // signature" by HMAC-ing the signing input with those public bytes as
+        // the secret.
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "address": { "country": "DE" },
+        });
+
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        // The legitimate holder builds one presentation for verifier A. The
+        // attacker below never touches the holder's private key: they only
+        // read the public presentation this produces.
+        let legit_presentation = SDJWTHolder::new(
+            holder_crypto_provider(),
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            Some("nonceA".to_string()),
+            Some("https://verifierA.example.com".to_string()),
+        )
+        .unwrap();
+
+        // Attacker: reuse the real (public) `sd_hash` from the legitimate
+        // presentation, but forge a brand-new KB-JWT for a different
+        // audience/nonce, "signed" with HS256 using the holder's PUBLIC cnf
+        // key bytes as the HMAC secret.
+        let parts: Vec<&str> = legit_presentation
+            .split(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
+            .collect();
+        let real_kb = parts.last().unwrap();
+        let kb_payload_b64 = real_kb.split('.').nth(1).unwrap();
+        let kb_payload: Map<String, Value> =
+            serde_json::from_slice(&base64url_decode(kb_payload_b64).unwrap()).unwrap();
+        let sd_hash = kb_payload.get("sd_hash").unwrap().clone();
+
+        let attacker_aud = "https://verifierB.example.com";
+        let attacker_nonce = "nonceB";
+        let forged_header = json!({ "alg": "HS256", "typ": "kb+jwt" });
+        let forged_payload = json!({
+            "nonce": attacker_nonce,
+            "aud": attacker_aud,
+            "iat": 1683000001,
+            "sd_hash": sd_hash,
+        });
+        let signing_input = format!(
+            "{}.{}",
+            base64url_encode(&serde_json::to_vec(&forged_header).unwrap()),
+            base64url_encode(&serde_json::to_vec(&forged_payload).unwrap()),
+        );
+
+        // Same raw bytes as the `x` coordinate in HOLDER_JWK_KEY_ED25519 — the
+        // holder's PUBLIC key, never the private key.
+        let public_key_bytes =
+            base64url_decode("24QLWXJ18wtbg3k_MDGhGM17Xh39UftuxbwJZzRLzkA").unwrap();
+        let forged_signature = jsonwebtoken::crypto::sign(
+            signing_input.as_bytes(),
+            &EncodingKey::from_secret(&public_key_bytes),
+            Algorithm::HS256,
+        )
+        .unwrap();
+        let forged_kb_jwt = format!("{signing_input}.{forged_signature}");
+
+        let mut forged_parts = parts.clone();
+        *forged_parts.last_mut().unwrap() = &forged_kb_jwt;
+        let forged_presentation = forged_parts.join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
+
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            forged_presentation,
+            Some(attacker_aud.to_string()),
+            Some(attacker_nonce.to_string()),
+            SDJWTSerializationFormat::Compact,
+        );
+
+        assert!(
+            result.is_err(),
+            "Verifier accepted a forged HS256 Key Binding JWT signed with the \
+             holder's PUBLIC cnf key bytes as the HMAC secret",
+        );
+    }
+
+    #[test]
     fn reject_sd_jwt_with_future_nbf() {
         // An SD-JWT whose `nbf` is in the future is not yet valid.
         let payload = json!({
@@ -1131,14 +1372,14 @@ mod tests {
             "nbf": 1883000000,
             "address": { "country": "DE" }
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         let signed =
             jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
         let sd_jwt = format!("{signed}~");
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1146,7 +1387,7 @@ mod tests {
         match result {
             Ok(_) => panic!("verifier accepted a presentation with a future `nbf`"),
             Err(err) => assert!(
-                err.to_string().contains("ImmatureSignature"),
+                err.to_string().contains("not yet valid"),
                 "expected an immature-signature failure, got: {err}"
             ),
         }
@@ -1161,15 +1402,15 @@ mod tests {
             "nbf": 1683000000,
             "address": { "country": "DE" }
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         let signed =
             jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
                 .unwrap();
         let sd_jwt = format!("{signed}~");
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1178,6 +1419,206 @@ mod tests {
             result.is_ok(),
             "verifier rejected an SD-JWT with a past `nbf`"
         );
+    }
+
+    #[test]
+    fn verify_presentation_without_iss() {
+        // `iss` is optional in the Issuer-signed JWT; a pinned-key provider
+        // does not need it.
+        let user_claims = json!({
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "iat": 1683000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = es256_signing_key();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
+                .unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            sd_jwt,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_ok(),
+            "verifier rejected a validly-signed SD-JWT without `iss`: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn verify_presentation_with_issuer_aud() {
+        // An `aud` in the Issuer-signed JWT must not be rejected outright:
+        // `expected_aud` applies to the Key Binding JWT, not to this claim.
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "aud": "https://verifier.example.com",
+            "address": { "country": "DE" }
+        });
+        let issuer_key = es256_signing_key();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
+                .unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            sd_jwt,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        assert!(
+            result.is_ok(),
+            "verifier rejected a validly-signed SD-JWT whose Issuer JWT carries `aud`: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn verify_propagates_provider_error() {
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = es256_signing_key();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
+                .unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            erroring_crypto_provider(),
+            sd_jwt,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted an SD-JWT its crypto provider rejected"),
+            Err(err) => assert!(
+                err.to_string().contains("unknown issuer"),
+                "expected the provider's error, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn reject_issuer_jwt_without_alg_header() {
+        // The former silent ES256 fallback is gone: a protected header without
+        // `alg` is an error, never an assumption.
+        let header = base64url_encode(b"{\"typ\":\"JWT\"}");
+        let payload = base64url_encode(
+            json!({"iss": "https://example.com/issuer"})
+                .to_string()
+                .as_bytes(),
+        );
+        let sd_jwt = format!("{header}.{payload}.AAAA~");
+
+        let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
+            sd_jwt,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted an Issuer JWT without `alg`"),
+            Err(err) => assert!(
+                err.to_string().contains("missing the `alg`"),
+                "expected a missing-`alg` rejection, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn reject_issuer_jwt_with_alg_outside_provider_allowlist() {
+        // The header `alg` (ES256) is one the library supports, but the
+        // provider's allowlist admits only ES384: the library must reject the
+        // JWT before the provider's `verify` runs.
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "address": { "country": "DE" }
+        });
+        let issuer_key = es256_signing_key();
+        let signed =
+            jsonwebtoken::encode(&Header::new(Algorithm::ES256), &user_claims, &issuer_key)
+                .unwrap();
+        let sd_jwt = format!("{signed}~");
+
+        let result = SDJWTVerifier::new(
+            es384_only_crypto_provider(),
+            sd_jwt,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted an `alg` outside the provider's allowlist"),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("not an allowed verification algorithm for the Issuer-signed JWT"),
+                "expected an allowlist rejection, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn reject_kb_jwt_with_alg_outside_provider_allowlist() {
+        // A Verifier may restrict which algorithms it accepts for the Key
+        // Binding JWT independently of the Issuer JWT: the holder's EdDSA
+        // KB-JWT is validly signed, but the provider allows only ES256 there.
+        let user_claims = json!({
+            "iss": "https://example.com/issuer",
+            "iat": 1683000000,
+            "sub": "6c5c0a49-b589-431d-bae7-219122a9ec2c",
+            "address": { "country": "DE" },
+        });
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
+            .issue_sd_jwt(
+                user_claims.clone(),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let presentation = SDJWTHolder::new(
+            holder_crypto_provider(),
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .create_presentation(
+            user_claims.as_object().unwrap().clone(),
+            Some("testNonce".to_string()),
+            Some("testAud".to_string()),
+        )
+        .unwrap();
+
+        let result = SDJWTVerifier::new(
+            kb_es256_only_crypto_provider(),
+            presentation,
+            Some("testAud".to_string()),
+            Some("testNonce".to_string()),
+            SDJWTSerializationFormat::Compact,
+        );
+        match result {
+            Ok(_) => panic!("verifier accepted a KB-JWT `alg` outside the provider's allowlist"),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("not an allowed verification algorithm for the Key Binding JWT"),
+                "expected a KB allowlist rejection, got: {err}"
+            ),
+        }
     }
 
     #[test]
@@ -1194,9 +1635,7 @@ mod tests {
                 "country": "DE"
             }
         });
-        let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
-        let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -1207,13 +1646,7 @@ mod tests {
             .unwrap();
         let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
             .unwrap();
 
         // Append a syntactically-valid but unreferenced disclosure. The
@@ -1231,8 +1664,8 @@ mod tests {
         );
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             tampered,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1252,8 +1685,7 @@ mod tests {
             "iat": 1683000000,
             "address": { "country": "DE" }
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -1265,17 +1697,11 @@ mod tests {
 
         let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
             .unwrap()
-            .create_presentation(
-                user_claims.as_object().unwrap().clone(),
-                None,
-                None,
-                None,
-                None,
-            )
+            .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
             .unwrap();
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             presentation,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1286,7 +1712,7 @@ mod tests {
     #[test]
     fn reject_disclosure_with_reserved_claim_name() {
         use crate::utils::base64_hash;
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         for reserved in ["_sd", "..."] {
             // A well-formed (3-element) Disclosure that discloses a claim named
             // `_sd` or `...`; §7.1 requires the Verifier to reject it.
@@ -1305,8 +1731,8 @@ mod tests {
             let sd_jwt = format!("{signed}~{disclosure}~");
 
             let result = SDJWTVerifier::new(
+                verifier_crypto_provider(),
                 sd_jwt,
-                issuer_key_resolver(),
                 None,
                 None,
                 SDJWTSerializationFormat::Compact,
@@ -1327,8 +1753,7 @@ mod tests {
             "exp": 1683000300,
             "address": { "country": "DE" }
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_key, None)
+        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider())
             .issue_sd_jwt(
                 user_claims.clone(),
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
@@ -1339,8 +1764,8 @@ mod tests {
             .unwrap();
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1348,7 +1773,7 @@ mod tests {
         match result {
             Ok(_) => panic!("verifier accepted a presentation with an expired `exp`"),
             Err(err) => assert!(
-                err.to_string().contains("ExpiredSignature"),
+                err.to_string().contains("expired"),
                 "expected an expiry failure, got: {err}"
             ),
         }
@@ -1368,14 +1793,14 @@ mod tests {
             "_sd": [digest],
             "_sd_alg": "sha-256",
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         let signed =
             jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
         let sd_jwt = format!("{signed}~{malformed}~");
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
@@ -1400,14 +1825,14 @@ mod tests {
             "arr": [ { "...": digest } ],
             "_sd_alg": "sha-256",
         });
-        let issuer_key = EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap();
+        let issuer_key = es256_signing_key();
         let signed =
             jsonwebtoken::encode(&Header::new(Algorithm::ES256), &payload, &issuer_key).unwrap();
         let sd_jwt = format!("{signed}~{malformed}~");
 
         let result = SDJWTVerifier::new(
+            verifier_crypto_provider(),
             sd_jwt,
-            issuer_key_resolver(),
             None,
             None,
             SDJWTSerializationFormat::Compact,
