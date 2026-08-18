@@ -178,15 +178,6 @@ impl SDJWTIssuer {
         self.holder_key = holder_key;
         self.add_decoy_claims = add_decoy_claims;
 
-        // The protected header is the library's own `ProtectedHeader` rather
-        // than `jsonwebtoken::Header`: that struct's `alg` is a closed enum of
-        // the algorithms jsonwebtoken implements (no `ES512`, whose P-521
-        // curve its crypto backend lacks, nor registry additions like `ES256K`
-        // or `ML-DSA-*`), while `signing_alg` returns the raw JWS wire name so
-        // a crypto provider may sign with algorithms the library does not
-        // know. And with signing behind the provider there is no in-process
-        // `EncodingKey` for `jsonwebtoken::encode` — `encode_jws` serializes
-        // the header itself and hands the raw signing input to the provider.
         let header = crate::ProtectedHeader::new(
             self.crypto_provider
                 .signing_alg(SDJWTSignatureRole::IssuerJwt)?,

@@ -352,9 +352,6 @@ impl SDJWTHolder {
         let crypto_provider = self.crypto_provider.as_ref().ok_or_else(|| {
             Error::InvalidInput("Key Binding requires a crypto provider".to_string())
         })?;
-        // The library's own `ProtectedHeader` rather than
-        // `jsonwebtoken::Header`, for the same reasons as the Issuer JWT
-        // header — see `SDJWTIssuer::issue_sd_jwt`.
         let header = crate::ProtectedHeader::new(
             crypto_provider.signing_alg(SDJWTSignatureRole::KeyBindingJwt)?,
             Some(KB_JWT_TYP_HEADER.to_string()),

@@ -16,6 +16,7 @@ use sd_jwt_rs::issuer::{ClaimsForSelectiveDisclosureStrategy, SDJWTIssuer};
 use sd_jwt_rs::holder::SDJWTHolder;
 use sd_jwt_rs::verifier::SDJWTVerifier;
 use sd_jwt_rs::SDJWTSerializationFormat;
+use sd_jwt_rs::{SDJWTCryptoProviderBuiltin, SDJWTKeyWithAlg};
 use serde_json::{Number, Value};
 use std::path::PathBuf;
 use types::cli::{Cli, GenerateType};
@@ -30,6 +31,8 @@ const SPECIFICATION_FILE_NAME: &str = "specification.yml";
 const SALTS_FILE_NAME: &str = "claims_vs_salts.json";
 const SD_JWT_FILE_NAME_TEMPLATE: &str = "sd_jwt_issuance";
 const VERIFIED_CLAIMS_FILE_NAME: &str = "verified_contents.json";
+
+const SIGNING_ALG: &str = "ES256";
 
 fn main() {
     let args = Cli::parse();
@@ -139,9 +142,12 @@ fn issue_sd_jwt(
         None
     };
 
-    let mut issuer = SDJWTIssuer::new(issuer_key, Some(String::from("ES256")));
+    let crypto_provider = SDJWTCryptoProviderBuiltin::new(&[SIGNING_ALG], None)
+        .with_issuer_signing_key(SDJWTKeyWithAlg::new(issuer_key, SIGNING_ALG))
+        .unwrap();
+    let mut issuer = SDJWTIssuer::new(Box::new(crypto_provider));
     let sd_jwt = issuer.issue_sd_jwt(
-            user_claims, 
+            user_claims,
             strategy,
             jwk,
             decoy,
@@ -157,22 +163,17 @@ fn create_presentation(
     serialization_format: SDJWTSerializationFormat,
     disclosed_claims: &serde_json::Map<String, serde_json::Value>
 ) -> Result<String> {
-    let pub_key_path = directory.clone().join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME);
+    let crypto_provider = issuer_verifying_crypto_provider(directory);
     let mut holder = SDJWTHolder::new(
+        Box::new(crypto_provider),
         sd_jwt.to_string(),
         serialization_format,
-        Box::new(move |_, _| {
-            let key = std::fs::read(&pub_key_path).expect("Failed to read file");
-            DecodingKey::from_ec_pem(&key).expect("Unable to create DecodingKey")
-        }),
     )
     .unwrap();
 
     let presentation = holder
         .create_presentation(
             disclosed_claims.clone(),
-            None,
-            None,
             None,
             None
         ).unwrap();
@@ -185,14 +186,11 @@ fn verify_presentation(
     presentation: &str,
     serialization_format: SDJWTSerializationFormat
 ) -> Result<Value> {
-    let pub_key_path = directory.clone().join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME);
+    let crypto_provider = issuer_verifying_crypto_provider(directory);
 
     let _verified = SDJWTVerifier::new(
+        Box::new(crypto_provider),
         presentation.to_string(),
-        Box::new(move |_, _| {
-            let key = std::fs::read(&pub_key_path).expect("Failed to read file");
-            DecodingKey::from_ec_pem(&key).expect("Unable to create EncodingKey")
-        }),
         None,
         None,
         serialization_format,
@@ -247,6 +245,15 @@ fn get_key(path: &PathBuf) -> EncodingKey {
     let key = std::fs::read(path).expect("Failed to read file");
 
     EncodingKey::from_ec_pem(&key).expect("Unable to create EncodingKey")
+}
+
+fn issuer_verifying_crypto_provider(directory: &PathBuf) -> SDJWTCryptoProviderBuiltin {
+    let key = std::fs::read(directory.join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME)).expect("Failed to read file");
+    let key = DecodingKey::from_ec_pem(&key).expect("Unable to create DecodingKey");
+
+    SDJWTCryptoProviderBuiltin::new(&[SIGNING_ALG], None)
+        .with_issuer_verifying_key(SDJWTKeyWithAlg::new(key, SIGNING_ALG))
+        .unwrap()
 }
 
 fn get_settings(path: &PathBuf) -> Settings {

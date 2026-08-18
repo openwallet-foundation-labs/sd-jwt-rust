@@ -33,12 +33,11 @@ pub mod utils;
 pub mod verifier;
 
 pub const DEFAULT_SIGNING_ALG: &str = "ES256";
-/// Verification-policy allowlist holding exactly [DEFAULT_SIGNING_ALG], for
-/// the common case where only the default algorithm is accepted.
 pub const ALLOWED_SIGNING_ALGS: &[&str] = &[DEFAULT_SIGNING_ALG];
 const SD_DIGESTS_KEY: &str = "_sd";
 const DIGEST_ALG_KEY: &str = "_sd_alg";
 pub const DEFAULT_DIGEST_ALG: &str = "sha-256";
+const CLOCK_SKEW_LEEWAY_SECONDS: u64 = 60;
 const SD_LIST_PREFIX: &str = "...";
 const _SD_JWT_TYP_HEADER: &str = "sd+jwt";
 const KB_JWT_TYP_HEADER: &str = "kb+jwt";
@@ -67,7 +66,9 @@ pub enum SDJWTSerializationFormat {
 }
 
 /// The JWS protected header, minted (`encode_jws`) and parsed
-/// (`parse_protected_header`) by the library — one type for both directions.
+/// (`parse_protected_header`) by the library — one type for both directions,
+/// used instead of `jsonwebtoken::Header` so `alg` can carry any JWS wire
+/// name a crypto provider supports, not just `jsonwebtoken`'s closed enum.
 /// [Self::new] is the single chokepoint where `alg` values SD-JWT must never
 /// use (`none`, symmetric `HS*`) are rejected: fields are private and both
 /// paths construct through it, so neither a minted nor an accepted header can
@@ -284,25 +285,24 @@ impl SDJWTCommon {
         };
         // A present `aud` in the Issuer-signed JWT is deliberately not checked
         // here: `expected_aud` applies to the Key Binding JWT.
-        Self::validate_temporal(&claims)?;
+        Self::check_validity_period(&claims)?;
         Ok(claims)
     }
 
-    fn validate_temporal(payload: &Map<String, Value>) -> Result<()> {
-        // `exp`/`nbf` are optional and checked only when present, with a
-        // 60-second leeway. NumericDate may be fractional, so parse as f64; a
-        // present-but-non-numeric value fails closed instead of being skipped.
-        const LEEWAY_SECONDS: u64 = 60;
+    fn check_validity_period(payload: &Map<String, Value>) -> Result<()> {
+        // `exp`/`nbf` are optional and checked only when present. NumericDate
+        // may be fractional, so parse as f64; a present-but-non-numeric value
+        // fails closed instead of being skipped.
         let now = now_seconds()?;
         if let Some(exp) = numeric_date(payload, "exp")? {
-            if exp < now.saturating_sub(LEEWAY_SECONDS) as f64 {
+            if exp < now.saturating_sub(CLOCK_SKEW_LEEWAY_SECONDS) as f64 {
                 return Err(Error::InvalidInput(
                     "JWT is expired (`exp` is in the past)".to_string(),
                 ));
             }
         }
         if let Some(nbf) = numeric_date(payload, "nbf")? {
-            if nbf > now.saturating_add(LEEWAY_SECONDS) as f64 {
+            if nbf > now.saturating_add(CLOCK_SKEW_LEEWAY_SECONDS) as f64 {
                 return Err(Error::InvalidInput(
                     "JWT is not yet valid (`nbf` is in the future)".to_string(),
                 ));
@@ -548,39 +548,41 @@ mod tests {
     }
 
     #[test]
-    fn validate_temporal_rejects_expired_fractional_exp() {
+    fn check_validity_period_rejects_expired_fractional_exp() {
         // A fractional NumericDate in the past must be rejected, not skipped.
         let payload = json!({ "exp": 1000.5 }).as_object().unwrap().clone();
-        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        let err = SDJWTCommon::check_validity_period(&payload).unwrap_err();
         assert!(format!("{err}").contains("expired"), "got: {err}");
     }
 
     #[test]
-    fn validate_temporal_rejects_non_numeric_exp() {
+    fn check_validity_period_rejects_non_numeric_exp() {
         // A present-but-non-numeric `exp` fails closed instead of being ignored.
         let payload = json!({ "exp": "1883000000" }).as_object().unwrap().clone();
-        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        let err = SDJWTCommon::check_validity_period(&payload).unwrap_err();
         assert!(format!("{err}").contains("NumericDate"), "got: {err}");
     }
 
     #[test]
-    fn validate_temporal_rejects_future_fractional_nbf() {
+    fn check_validity_period_rejects_future_fractional_nbf() {
         let payload = json!({ "nbf": 9999999999.0_f64 })
             .as_object()
             .unwrap()
             .clone();
-        let err = SDJWTCommon::validate_temporal(&payload).unwrap_err();
+        let err = SDJWTCommon::check_validity_period(&payload).unwrap_err();
         assert!(format!("{err}").contains("not yet valid"), "got: {err}");
     }
 
     #[test]
-    fn validate_temporal_accepts_absent_and_valid() {
-        assert!(SDJWTCommon::validate_temporal(&json!({}).as_object().unwrap().clone()).is_ok());
+    fn check_validity_period_accepts_absent_and_valid() {
+        assert!(
+            SDJWTCommon::check_validity_period(&json!({}).as_object().unwrap().clone()).is_ok()
+        );
         let payload = json!({ "exp": 9999999999_u64, "nbf": 1_u64 })
             .as_object()
             .unwrap()
             .clone();
-        assert!(SDJWTCommon::validate_temporal(&payload).is_ok());
+        assert!(SDJWTCommon::check_validity_period(&payload).is_ok());
     }
 
     #[test]

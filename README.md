@@ -70,27 +70,15 @@ The library keeps ownership of all JWS encoding/decoding, header parsing
 enforcing the provider's algorithm allowlist; the provider owns key
 selection and trust.
 
-The builtin binds the Issuer verifying key to exactly one JWS algorithm
-(RFC 8725 §3.1: each key is used with exactly one algorithm) — a JWT whose
-header `alg` differs from the bound one is rejected before any cryptographic
-operation, and the bound algorithm, never the header's, is what the crypto
-layer runs. The algorithm policy is declared once, at construction:
-`SDJWTCryptoProviderBuiltin::new(issuer_algs, holder_algs)` takes the
-Issuer allowlist and, optionally, the Key Binding one (the KB `cnf` key
-arrives in-band per presentation, so that declared set is the only KB
-narrowing; pass `None` when Key Binding is not used). The key setters take
-a `SDJWTKeyWithAlg` — a key bundled with the one JWS algorithm it is used with —
-and return `Result`, rejecting at configuration time a key whose algorithm
-the declared policy excludes or that SD-JWT never accepts (`none`,
-symmetric `HS*`). Unusable declarations themselves (an empty list, dead
-entries) are not errors — they simply fail closed. For key rotation,
-`with_issuer_verifying_key_for_kid(kid, key)` registers additional pinned keys
-selected by the token's header `kid`; an unknown or absent `kid` falls back
-to the `with_issuer_verifying_key` default key when one is bound, and fails
-otherwise.
-The trait-level `allowed_verifying_algs` likewise stays a set so a custom
-multi-key provider can accept several algorithms — each key still used with
-exactly one.
+The builtin binds each key to exactly one JWS algorithm (RFC 8725 §3.1).
+The policy is declared once:
+`SDJWTCryptoProviderBuiltin::new(issuer_algs, holder_algs)` takes the Issuer
+allowlist and, optionally, the Key Binding one (`None` when Key Binding is
+not used). The key setters take a `SDJWTKeyWithAlg` — a key paired with its
+algorithm. For key rotation, `with_issuer_verifying_key_for_kid(kid, key)`
+registers additional pinned keys selected by the token's header `kid`,
+falling back to the `with_issuer_verifying_key` default key when one is
+bound.
 
 ## Repository structure
 

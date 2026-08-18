@@ -52,17 +52,12 @@ pub struct SDJWTKeyRequest {
 /// (`BASE64URL(header) . BASE64URL(payload)` as bytes); signatures are raw
 /// bytes — the library owns all JWS encoding and decoding.
 ///
-/// `Send + Sync` so an injected provider (e.g. an FFI-backed keystore) can be
-/// held by an issuer/holder/verifier shared across threads.
-///
 /// The methods form two pairs — signing ([Self::signing_alg] + [Self::sign])
 /// and verifying ([Self::allowed_verifying_algs] + [Self::verify]) — and each
 /// pair has a fail-closed default returning [Error::KeyNotFound], so a
-/// provider implements only the pair(s) its party performs: signing for an
-/// Issuer, verifying for a Verifier, both for a Holder that presents with Key
-/// Binding. The library only ever calls the pair the operation needs, so the
-/// defaults are unreachable in a correctly-wired deployment; miswired, they
-/// refuse instead of accepting.
+/// provider implements only the pair(s) its party performs. `Send + Sync` so
+/// an injected provider can be held by an issuer/holder/verifier shared
+/// across threads.
 pub trait SDJWTCryptoProvider: Send + Sync {
     /// JWS `alg` wire name that `sign(role)` produces.
     /// Defaults to an error for providers that do not sign.
@@ -72,11 +67,10 @@ pub trait SDJWTCryptoProvider: Send + Sync {
         )))
     }
     /// JWS `alg` values this provider accepts when verifying a `role`
-    /// signature — the RFC 8725 §3.1 algorithm allowlist. A verification
-    /// algorithm must never be selected by the (attacker-controlled) JWT
-    /// header, so the library rejects a JWT whose header `alg` is not in
-    /// this list *before* calling [SDJWTCryptoProvider::verify];
-    /// implementations cannot forget the check.
+    /// signature — the RFC 8725 §3.1 algorithm allowlist. The library
+    /// rejects a JWT whose header `alg` is not in this list *before* calling
+    /// [SDJWTCryptoProvider::verify], so the (attacker-controlled) header
+    /// never selects the algorithm.
     /// Defaults to an error for providers that do not verify.
     fn allowed_verifying_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
         Err(Error::KeyNotFound(format!(
@@ -102,11 +96,9 @@ pub trait SDJWTCryptoProvider: Send + Sync {
 }
 
 /// A key bundled with the JWS `alg` wire name (e.g. `"ES256"`) it is used
-/// with. A key is meaningless without knowing which algorithm to apply it
-/// under (RFC 8725 §3.1: each key is used with exactly one algorithm), so the
-/// two travel as one value through [SDJWTCryptoProviderBuiltin]'s key-binding
-/// methods. Whether the `alg` is acceptable is checked where the pair is
-/// bound to a provider, against that provider's declared policy — not here.
+/// with — each key is used with exactly one algorithm (RFC 8725 §3.1).
+/// Whether the `alg` is acceptable is checked where the pair is bound to a
+/// provider, against that provider's declared policy — not here.
 pub struct SDJWTKeyWithAlg<K> {
     key: K,
     alg: String,
@@ -124,16 +116,12 @@ impl<K> SDJWTKeyWithAlg<K> {
 }
 
 /// Software crypto provider over jsonwebtoken. The algorithm policy is
-/// declared once, at construction ([Self::new] — no defaults, no
-/// re-declaration), and every key bound afterwards carries exactly one JWS
-/// algorithm inside that declared policy (RFC 8725 §3.1: each key is used
-/// with exactly one algorithm). The Issuer JWT is verified with a pinned
-/// Issuer key — a `kid`-keyed set for rotation, a default key, or both —
-/// under that key's bound algorithm; the Key Binding JWT is verified with
-/// the in-band `cnf` key from the request. In both cases a symmetric
-/// (`HS*`) `alg` is rejected outright: the in-band `cnf` key only ever
-/// carries public key material, so honoring an HMAC alg there would let
-/// anyone holding that public key forge a signature.
+/// declared once, at construction ([Self::new]), and every key bound
+/// afterwards carries exactly one JWS algorithm inside that policy. The
+/// Issuer JWT is verified with a pinned Issuer key — a `kid`-keyed set for
+/// rotation, a default key, or both — under that key's bound algorithm; the
+/// Key Binding JWT is verified with the in-band `cnf` key from the request.
+/// A symmetric (`HS*`) `alg` is rejected outright in both cases.
 pub struct SDJWTCryptoProviderBuiltin {
     issuer_signing: Option<SDJWTKeyWithAlg<EncodingKey>>,
     holder_signing: Option<SDJWTKeyWithAlg<EncodingKey>>,
@@ -145,14 +133,10 @@ pub struct SDJWTCryptoProviderBuiltin {
 
 impl SDJWTCryptoProviderBuiltin {
     /// A crypto provider holding the declared algorithm policy and no keys
-    /// yet. `allowed_issuer_signing_algs` is the RFC 8725 §3.1 allowlist
-    /// for the Issuer's signature; `allowed_holder_signing_algs` is the Key
-    /// Binding counterpart — `None` for a provider that neither signs nor
-    /// verifies Key Binding JWTs (KB verification then fails closed). Keys
-    /// bound afterwards must carry an algorithm inside the declared policy.
-    /// Unusable declarations are the caller's own loss, not errors: entries
-    /// SD-JWT never accepts (`none`, symmetric `HS*`) are dead, and an
-    /// empty list fail-closes the role.
+    /// yet. `allowed_issuer_signing_algs` is the allowlist for the Issuer's
+    /// signature; `allowed_holder_signing_algs` is the Key Binding
+    /// counterpart — `None` for a provider that neither signs nor verifies
+    /// Key Binding JWTs (KB verification then fails closed).
     pub fn new(
         allowed_issuer_signing_algs: &[&str],
         allowed_holder_signing_algs: Option<&[&str]>,
@@ -172,10 +156,9 @@ impl SDJWTCryptoProviderBuiltin {
     }
 
     /// Sign Issuer JWTs with the Issuer's `key`, under the algorithm bundled
-    /// with it. That algorithm must be one SD-JWT can accept (`none` and
-    /// symmetric `HS*` are not) and be inside the issuer allowlist declared
-    /// at [Self::new] — a contradicted policy fails here, at configuration
-    /// time, instead of minting tokens the declared policy rejects.
+    /// with it. Binding fails at configuration time if that algorithm is one
+    /// SD-JWT never accepts (`none`, symmetric `HS*`) or is outside the
+    /// issuer allowlist declared at [Self::new].
     pub fn with_issuer_signing_key(mut self, key: SDJWTKeyWithAlg<EncodingKey>) -> Result<Self> {
         reject_unacceptable_alg(&key.alg)?;
         if !self
@@ -193,11 +176,10 @@ impl SDJWTCryptoProviderBuiltin {
     }
 
     /// Sign Key Binding JWTs with the Holder's `key`, under the algorithm
-    /// bundled with it. The Key Binding allowlist must have been declared
-    /// at [Self::new] and include that algorithm, which must be one SD-JWT
-    /// can accept (`none` and symmetric `HS*` are not) — a missing or
-    /// contradicted policy fails here, at configuration time, instead of
-    /// minting tokens the declared policy rejects.
+    /// bundled with it. Binding fails at configuration time if the Key
+    /// Binding allowlist was not declared at [Self::new], excludes that
+    /// algorithm, or the algorithm is one SD-JWT never accepts (`none`,
+    /// symmetric `HS*`).
     pub fn with_holder_signing_key(mut self, key: SDJWTKeyWithAlg<EncodingKey>) -> Result<Self> {
         reject_unacceptable_alg(&key.alg)?;
         let allowed = self.allowed_holder_signing_algs.as_ref().ok_or_else(|| {
@@ -216,31 +198,23 @@ impl SDJWTCryptoProviderBuiltin {
         Ok(self)
     }
 
-    /// Verify Issuer JWTs with the Issuer's public `key` under exactly the
-    /// algorithm bundled with it (RFC 8725 §3.1: each key is used with
-    /// exactly one algorithm) — a JWT whose header `alg` differs is rejected
-    /// before the cryptographic operation. That algorithm must be one SD-JWT
-    /// can accept at all (`none` and symmetric `HS*` are not) and be inside
-    /// the issuer allowlist declared at [Self::new] — a contradicted policy
-    /// fails here, at configuration time, instead of failing every
-    /// verification later. This is the default key: a token whose `kid`
-    /// matches no [Self::with_issuer_verifying_key_for_kid] entry (or that
-    /// carries no `kid`) verifies against it. Key Binding JWTs are verified
-    /// with the in-band `cnf` key instead, so they need no pinned key here.
+    /// Verify Issuer JWTs with the Issuer's public `key`, under exactly the
+    /// algorithm bundled with it — a JWT whose header `alg` differs is
+    /// rejected before the cryptographic operation. This is the default key:
+    /// a token whose `kid` matches no [Self::with_issuer_verifying_key_for_kid]
+    /// entry (or that carries no `kid`) verifies against it. The same
+    /// configuration-time policy checks apply as for signing keys.
     pub fn with_issuer_verifying_key(mut self, key: SDJWTKeyWithAlg<DecodingKey>) -> Result<Self> {
         self.issuer_verifying = Some(self.issuer_verifying_entry(key)?);
         Ok(self)
     }
 
     /// Set the pinned Issuer verifying key for tokens whose header `kid`
-    /// equals `kid`, used under exactly the algorithm bundled with the key.
-    /// Call once per `kid` to build the rotation key set; setting the same
-    /// `kid` again replaces that entry. Trust is fixed here, at
-    /// registration: the (attacker-controlled) header `kid` only ever
-    /// selects among these pre-trusted keys. A token whose `kid` matches no
-    /// entry falls back to the [Self::with_issuer_verifying_key] default
-    /// key when one is bound, and fails otherwise. The same policy rules
-    /// apply as for the default key.
+    /// equals `kid`; setting the same `kid` again replaces that entry. The
+    /// (attacker-controlled) header `kid` only ever selects among these
+    /// pre-trusted keys — a token whose `kid` matches no entry falls back to
+    /// the [Self::with_issuer_verifying_key] default key when one is bound,
+    /// and fails otherwise.
     pub fn with_issuer_verifying_key_for_kid(
         mut self,
         kid: &str,
@@ -332,12 +306,9 @@ impl SDJWTCryptoProvider for SDJWTCryptoProviderBuiltin {
             // The in-band Holder key: its trust derives from the verified
             // Issuer payload, so it is honored without a pinned key.
             (Some(jwk_json), _) if request.role == SDJWTSignatureRole::KeyBindingJwt => {
-                // Defense-in-depth: `parse_protected_header` already rejects a
-                // symmetric `alg` for every crypto provider, but the in-band `cnf` key
-                // here is taken verbatim from the (verified) Issuer payload —
-                // `DecodingKey::from_jwk` exposes only the public key bytes,
-                // so accepting an HMAC alg here would let anyone holding the
-                // public key alone forge a signature over them.
+                // Defense-in-depth: `parse_protected_header` already rejects
+                // symmetric `alg`s; honoring one against the public `cnf` key
+                // bytes would let anyone forge (see `is_symmetric_alg`).
                 if is_symmetric_alg(&request.alg) {
                     return Err(Error::InvalidInput(format!(
                         "symmetric JWT `alg` \"{}\" is not acceptable for Key Binding JWT verification",
@@ -372,9 +343,7 @@ impl SDJWTCryptoProvider for SDJWTCryptoProviderBuiltin {
                         request.alg
                     )));
                 }
-                // RFC 8725 §3.1: each key is used with exactly one algorithm,
-                // "checked when the cryptographic operation is performed" —
-                // and the bound alg (never the header's) is what reaches
+                // The bound alg — never the header's — is what reaches
                 // `crypto::verify` below, which does not itself check
                 // key-family/alg consistency.
                 if request.alg != verifying.alg {
@@ -435,9 +404,7 @@ pub(crate) fn reject_unacceptable_alg(alg: &str) -> Result<()> {
 }
 
 /// Serialize `header` and `payload` and sign them via `crypto_provider` into
-/// a compact JWS. A header carrying an `alg` the library would reject on the
-/// verify side (`none`, symmetric `HS*`) is unrepresentable: constructing the
-/// [crate::ProtectedHeader] already refused it.
+/// a compact JWS.
 pub(crate) fn encode_jws(
     header: &crate::ProtectedHeader,
     payload: &impl Serialize,

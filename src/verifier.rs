@@ -137,7 +137,7 @@ impl SDJWTVerifier {
             &request,
             self.crypto_provider.as_ref(),
         )?;
-        SDJWTCommon::validate_temporal(&claims)?;
+        SDJWTCommon::check_validity_period(&claims)?;
         if claims.get("nonce") != Some(&Value::String(expected_nonce)) {
             return Err(Error::InvalidInput("Invalid nonce".to_string()));
         }
@@ -148,11 +148,10 @@ impl SDJWTVerifier {
         }
         // The KB-JWT `iat` must be present, numeric, and not in the future; a
         // past-side max-age window is left to the application.
-        const IAT_LEEWAY_SECONDS: u64 = 60;
         let iat = numeric_date(&claims, "iat")?.ok_or_else(|| {
             Error::InvalidInput("Missing required `iat` claim in KB-JWT".to_string())
         })?;
-        if iat > now_seconds()?.saturating_add(IAT_LEEWAY_SECONDS) as f64 {
+        if iat > now_seconds()?.saturating_add(crate::CLOCK_SKEW_LEEWAY_SECONDS) as f64 {
             return Err(Error::InvalidInput(
                 "Key Binding JWT `iat` is in the future".to_string(),
             ));
@@ -893,14 +892,14 @@ mod tests {
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
                 None,
                 false,
-                SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+                SDJWTSerializationFormat::FlattenedJson,
             )
             .unwrap();
 
         let presentation = SDJWTHolder::new(
             ed25519_verifying_crypto_provider(),
             sd_jwt.clone(),
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            SDJWTSerializationFormat::FlattenedJson,
         )
         .unwrap()
         .create_presentation(user_claims.as_object().unwrap().clone(), None, None)
@@ -911,7 +910,7 @@ mod tests {
             presentation,
             None,
             None,
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            SDJWTSerializationFormat::FlattenedJson,
         )
         .unwrap()
         .verified_claims;
@@ -941,7 +940,7 @@ mod tests {
                 ClaimsForSelectiveDisclosureStrategy::AllLevels,
                 Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
                 false,
-                SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+                SDJWTSerializationFormat::FlattenedJson,
             )
             .unwrap();
 
@@ -951,7 +950,7 @@ mod tests {
         let mut holder = SDJWTHolder::new(
             holder_crypto_provider(),
             sd_jwt.clone(),
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            SDJWTSerializationFormat::FlattenedJson,
         )
         .unwrap();
         let presentation = holder
@@ -966,7 +965,7 @@ mod tests {
             presentation,
             aud.clone(),
             nonce.clone(),
-            SDJWTSerializationFormat::FlattenedJson, // Changed to Flattened Json format
+            SDJWTSerializationFormat::FlattenedJson,
         )
         .unwrap()
         .verified_claims;
@@ -1260,17 +1259,10 @@ mod tests {
 
     #[test]
     fn reject_forged_hs256_key_binding_jwt() {
-        // Algorithm-confusion regression test: an attacker who never sees the
-        // holder's private key should not be able to rebind a stolen
-        // presentation to an audience/nonce of their choosing. Before the
-        // fix, `SDJWTCryptoProviderBuiltin::verify` took `alg` from the
-        // (attacker-controlled) KB-JWT header at face value and passed it to
-        // `jsonwebtoken::crypto::verify`, which — unlike `jsonwebtoken::decode`
-        // — does not check that the key family matches `alg`. An EC/OKP `cnf`
-        // key parsed via `DecodingKey::from_jwk` exposes its PUBLIC key bytes
-        // via `as_bytes()`, so an attacker can compute a valid "HS256
-        // signature" by HMAC-ing the signing input with those public bytes as
-        // the secret.
+        // Algorithm confusion: an EC/OKP `cnf` key exposes only public key
+        // bytes, so an attacker without the holder's private key can compute
+        // a valid "HS256 signature" by HMAC-ing the signing input with those
+        // public bytes — the symmetric `alg` must be rejected, not honored.
         let user_claims = json!({
             "iss": "https://example.com/issuer",
             "iat": 1683000000,
