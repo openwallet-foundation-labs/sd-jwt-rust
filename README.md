@@ -11,18 +11,74 @@ Proposals about API improvements are highly appreciated.
 
 ```rust
 fn demo() {
-    let mut issuer = SDJWTIssuer::new(issuer_key, None);
-    let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_key, add_decoy, SDJWTSerializationFormat::Compact).unwrap();
+    let issuer_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        .with_issuer_signing_key(SDJWTKeyWithAlg::new(issuer_private_key, "ES256")).unwrap());
+    let mut issuer = SDJWTIssuer::new(issuer_crypto_provider);
+    let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_jwk, add_decoy, SDJWTSerializationFormat::Compact).unwrap();
 
-    let mut holder = SDJWTHolder::new(sd_jwt, SDJWTSerializationFormat::Compact, Box::new(cb_to_resolve_issuer_key)).unwrap();
-    let presentation = holder.create_presentation(claims_to_disclosure, None, None, None, None).unwrap();
+    let holder_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        .with_issuer_verifying_key(SDJWTKeyWithAlg::new(issuer_public_key.clone(), "ES256")).unwrap());
+    let mut holder = SDJWTHolder::new(holder_crypto_provider, sd_jwt, SDJWTSerializationFormat::Compact).unwrap();
+    let presentation = holder.create_presentation(claims_to_disclosure, None, None).unwrap();
 
-    let verified_claims = SDJWTVerifier::new(presentation, Box::new(cb_to_resolve_issuer_key), None, None, SDJWTSerializationFormat::Compact).unwrap()
+    let verifier_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        .with_issuer_verifying_key(SDJWTKeyWithAlg::new(issuer_public_key, "ES256")).unwrap());
+    let verified_claims = SDJWTVerifier::new(verifier_crypto_provider, presentation, None, None, SDJWTSerializationFormat::Compact).unwrap()
                             .verified_claims;
 }
 ```
 
 See `tests/demos.rs` for more details;
+
+### Custom crypto providers
+
+`SDJWTCryptoProviderBuiltin` covers the common case where raw key material is
+held in memory. To keep keys in a platform keystore, HSM, or remote KMS —
+where keys are non-extractable and only the signing/verification *operation*
+may cross the boundary — implement `SDJWTCryptoProvider` and inject that
+instead:
+
+```rust
+struct KeystoreProvider { /* handle to the keystore */ }
+
+impl SDJWTCryptoProvider for KeystoreProvider {
+    fn signing_alg(&self, role: SDJWTSignatureRole) -> Result<String> {
+        // JWS `alg` name of the key the keystore holds for `role`.
+    }
+    fn allowed_verifying_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
+        // Algorithm allowlist (RFC 8725 §3.1): the library rejects any JWT
+        // whose header `alg` is not listed here BEFORE calling `verify`.
+    }
+    fn sign(&self, message: &[u8], role: SDJWTSignatureRole) -> Result<Vec<u8>> {
+        // Sign the raw JWS signing input with the keystore-held key.
+    }
+    fn verify(&self, message: &[u8], signature: &[u8], request: &SDJWTKeyRequest) -> Result<()> {
+        // Select and trust a key for the signer `request` describes.
+        // `request.iss` / `request.kid` / `request.x5c` are UNVERIFIED input.
+    }
+}
+```
+
+Each method pair — signing (`signing_alg` + `sign`) and verifying
+(`allowed_verifying_algs` + `verify`) — has a fail-closed default returning
+an error, so implement only the pair(s) your party performs: signing for an
+Issuer, verifying for a Verifier, both for a Holder that presents with Key
+Binding.
+
+The library keeps ownership of all JWS encoding/decoding, header parsing
+(rejecting `alg` `none` and symmetric `HS*`), `exp`/`nbf` validation, and
+enforcing the provider's algorithm allowlist; the provider owns key
+selection and trust.
+
+The builtin binds each key to exactly one JWS algorithm (RFC 8725 §3.1).
+The policy is declared once:
+`SDJWTCryptoProviderBuiltin::new(issuer_algs, holder_algs)` takes the Issuer
+allowlist and, optionally, the Key Binding one (`None` when Key Binding is
+not used). The key setters take a `SDJWTKeyWithAlg` — a key paired with its
+algorithm. For key rotation, `with_issuer_verifying_key_for_kid(kid, key)`
+registers additional pinned keys selected by the token's header `kid`,
+falling back to the `with_issuer_verifying_key` default key when one is
+bound.
 
 ## Repository structure
 
