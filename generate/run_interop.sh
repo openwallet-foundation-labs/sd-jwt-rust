@@ -27,4 +27,3 @@ for cases_dir in "$sd_jwt_py/examples" "$sd_jwt_py/tests/testcases"; do
         "$BIN" -p "${test_case_dir%/}"
     done
 done
-q
