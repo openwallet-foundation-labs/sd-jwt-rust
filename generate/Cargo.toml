@@ -11,5 +11,5 @@ clap = { version = "4.4.10", features = ["derive"] }
 serde = { version = "1.0.193", features = ["derive"] }
 serde_yaml = "0.9.27"
 serde_json = { version = "1.0.113", features = ["preserve_order"] }
-jsonwebtoken = "9.1"
+jsonwebtoken = "11.0.0"
 sd-jwt-rs = {path = "./..", features = ["mock_salts"]}
