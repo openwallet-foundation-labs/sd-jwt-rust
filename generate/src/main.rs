@@ -1,4 +1,4 @@
-// Copyright (c) 2024 DSR Corporation, Denver, Colorado.
+// Copyright (c) 2026 DSR Corporation, Denver, Colorado.
 // https://www.dsr-corporation.com
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,11 +9,11 @@ mod utils;
 use jsonwebtoken::jwk::Jwk;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::utils::funcs::{parse_sdjwt_paylod, load_salts};
+use crate::utils::funcs::{load_salts, parse_sdjwt_paylod};
 use clap::Parser;
-use jsonwebtoken::{EncodingKey, DecodingKey};
-use sd_jwt_rs::issuer::{ClaimsForSelectiveDisclosureStrategy, SDJWTIssuer};
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use sd_jwt_rs::holder::SDJWTHolder;
+use sd_jwt_rs::issuer::{ClaimsForSelectiveDisclosureStrategy, SDJWTIssuer};
 use sd_jwt_rs::verifier::SDJWTVerifier;
 use sd_jwt_rs::SDJWTSerializationFormat;
 use sd_jwt_rs::{SDJWTCryptoProviderBuiltin, SDJWTKeyWithAlg};
@@ -44,8 +44,15 @@ fn main() {
 
     for mut directory in spec_directories {
         println!("Generating data for '{:?}'", directory);
-        let settings = get_settings(&directory.parent().unwrap().join("..").join(SETTINGS_FILE_NAME));
         let specs = Specification::from(&directory);
+        let settings = get_settings(
+            &directory
+                .parent()
+                .unwrap()
+                .join("..")
+                .join(SETTINGS_FILE_NAME),
+            specs.settings_override.as_ref(),
+        );
 
         // Remove specification.yaml from path
         directory.pop();
@@ -66,32 +73,52 @@ fn generate_and_check(
 
     match &specs.serialization_format {
         Some(format) if format == "json" => {
-            serialization_format = SDJWTSerializationFormat::FlattenedJson;
+            serialization_format = if settings.key_settings.issuer_keys.len() > 1 {
+                SDJWTSerializationFormat::GeneralJson
+            } else {
+                SDJWTSerializationFormat::FlattenedJson
+            };
             stored_sd_jwt_file_path = directory.join(format!("{SD_JWT_FILE_NAME_TEMPLATE}.json"));
-        },
+        }
         Some(format) if format == "compact" => {
             serialization_format = SDJWTSerializationFormat::Compact;
             stored_sd_jwt_file_path = directory.join(format!("{SD_JWT_FILE_NAME_TEMPLATE}.txt"));
-        },
+        }
         None => {
             println!("using default serialization format: Compact");
             serialization_format = SDJWTSerializationFormat::Compact;
             stored_sd_jwt_file_path = directory.join(format!("{SD_JWT_FILE_NAME_TEMPLATE}.txt"));
-        },
+        }
         Some(format) => {
             panic!("unsupported format: {format}");
-        },
+        }
     };
 
-    let sd_jwt = issue_sd_jwt(directory, &specs, settings, serialization_format.clone(), decoy)?;
-    let presentation = create_presentation(directory, &sd_jwt, serialization_format.clone(), &specs.holder_disclosed_claims)?;
+    let sd_jwt = issue_sd_jwt(
+        directory,
+        &specs,
+        settings,
+        serialization_format.clone(),
+        decoy,
+    )?;
+    let presentation = create_presentation(
+        directory,
+        &sd_jwt,
+        serialization_format.clone(),
+        &specs.holder_disclosed_claims,
+    )?;
 
     // Verify presentation
-    let verified_claims = verify_presentation(directory, &presentation, serialization_format.clone())?;
+    let verified_claims =
+        verify_presentation(directory, &presentation, serialization_format.clone())?;
 
     let loaded_sd_jwt = load_sd_jwt(&stored_sd_jwt_file_path)?;
 
-    let loaded_sdjwt_paylod = parse_sdjwt_paylod(&loaded_sd_jwt.replace('\n', ""), &serialization_format, decoy)?;
+    let loaded_sdjwt_paylod = parse_sdjwt_paylod(
+        &loaded_sd_jwt.replace('\n', ""),
+        &serialization_format,
+        decoy,
+    )?;
     let issued_sdjwt_paylod = parse_sdjwt_paylod(&sd_jwt, &serialization_format, decoy)?;
 
     compare_jwt_payloads(&loaded_sdjwt_paylod, &issued_sdjwt_paylod)?;
@@ -109,7 +136,7 @@ fn issue_sd_jwt(
     specs: &Specification,
     settings: &Settings,
     serialization_format: SDJWTSerializationFormat,
-    decoy: bool
+    decoy: bool,
 ) -> Result<String> {
     let issuer_key = get_key(&directory.join(ISSUER_KEY_PEM_FILE_NAME));
 
@@ -117,23 +144,31 @@ fn issue_sd_jwt(
     let claims_obj = user_claims.as_object_mut().expect("must be an object");
 
     if !claims_obj.contains_key("iss") {
-        claims_obj.insert(String::from("iss"), Value::String(settings.identifiers.issuer.clone()));
+        claims_obj.insert(
+            String::from("iss"),
+            Value::String(settings.identifiers.issuer.clone()),
+        );
     }
 
     if !claims_obj.contains_key("iat") {
-        let iat = settings.iat.expect("'iat' value must be provided by settings.yml");
+        let iat = settings
+            .iat
+            .expect("'iat' value must be provided by settings.yml");
         claims_obj.insert(String::from("iat"), Value::Number(Number::from(iat)));
     }
 
     if !claims_obj.contains_key("exp") {
-        let exp = settings.exp.expect("'expt' value must be provided by settings.yml");
+        let exp = settings
+            .exp
+            .expect("'expt' value must be provided by settings.yml");
         claims_obj.insert(String::from("exp"), Value::Number(Number::from(exp)));
     }
 
     let sd_claims_jsonpaths = specs.user_claims.sd_claims_to_jsonpath()?;
 
-    let strategy =
-        ClaimsForSelectiveDisclosureStrategy::Custom(sd_claims_jsonpaths.iter().map(String::as_str).collect());
+    let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(
+        sd_claims_jsonpaths.iter().map(String::as_str).collect(),
+    );
 
     let jwk: Option<Jwk> = if specs.key_binding.unwrap_or(false) {
         let jwk: Jwk = serde_yaml::from_value(settings.key_settings.holder_key.clone()).unwrap();
@@ -146,12 +181,8 @@ fn issue_sd_jwt(
         .with_issuer_signing_key(SDJWTKeyWithAlg::new(issuer_key, SIGNING_ALG))
         .unwrap();
     let mut issuer = SDJWTIssuer::new(Box::new(crypto_provider));
-    let sd_jwt = issuer.issue_sd_jwt(
-            user_claims,
-            strategy,
-            jwk,
-            decoy,
-            serialization_format)
+    let sd_jwt = issuer
+        .issue_sd_jwt(user_claims, strategy, jwk, decoy, serialization_format)
         .unwrap();
 
     Ok(sd_jwt)
@@ -161,7 +192,7 @@ fn create_presentation(
     directory: &PathBuf,
     sd_jwt: &str,
     serialization_format: SDJWTSerializationFormat,
-    disclosed_claims: &serde_json::Map<String, serde_json::Value>
+    disclosed_claims: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<String> {
     let crypto_provider = issuer_verifying_crypto_provider(directory);
     let mut holder = SDJWTHolder::new(
@@ -172,11 +203,8 @@ fn create_presentation(
     .unwrap();
 
     let presentation = holder
-        .create_presentation(
-            disclosed_claims.clone(),
-            None,
-            None
-        ).unwrap();
+        .create_presentation(disclosed_claims.clone(), None, None)
+        .unwrap();
 
     Ok(presentation)
 }
@@ -184,7 +212,7 @@ fn create_presentation(
 fn verify_presentation(
     directory: &PathBuf,
     presentation: &str,
-    serialization_format: SDJWTSerializationFormat
+    serialization_format: SDJWTSerializationFormat,
 ) -> Result<Value> {
     let crypto_provider = issuer_verifying_crypto_provider(directory);
 
@@ -194,7 +222,8 @@ fn verify_presentation(
         None,
         None,
         serialization_format,
-    ).unwrap();
+    )
+    .unwrap();
 
     Ok(_verified.verified_claims)
 }
@@ -220,7 +249,10 @@ fn compare_jwt_payloads(loaded_payload: &Value, issued_payload: &Value) -> Resul
         println!("Issued SD-JWT \n {:#?}", issued_payload);
         println!("Loaded SD-JWT \n {:#?}", loaded_payload);
 
-        return Err(Error::from_msg(ErrorKind::DataNotEqual, "JWT payloads are different"));
+        return Err(Error::from_msg(
+            ErrorKind::DataNotEqual,
+            "JWT payloads are different",
+        ));
     }
 
     Ok(())
@@ -235,7 +267,10 @@ fn compare_verified_claims(loaded_claims: &Value, verified_claims: &Value) -> Re
         println!("Issued verified claims \n {:#?}", verified_claims);
         println!("Loaded verified claims \n {:#?}", loaded_claims);
 
-        return Err(Error::from_msg(ErrorKind::DataNotEqual, "verified claims are different"));
+        return Err(Error::from_msg(
+            ErrorKind::DataNotEqual,
+            "verified claims are different",
+        ));
     }
 
     Ok(())
@@ -248,7 +283,8 @@ fn get_key(path: &PathBuf) -> EncodingKey {
 }
 
 fn issuer_verifying_crypto_provider(directory: &PathBuf) -> SDJWTCryptoProviderBuiltin {
-    let key = std::fs::read(directory.join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME)).expect("Failed to read file");
+    let key = std::fs::read(directory.join(ISSUER_PUBLIC_KEY_PEM_FILE_NAME))
+        .expect("Failed to read file");
     let key = DecodingKey::from_ec_pem(&key).expect("Unable to create DecodingKey");
 
     SDJWTCryptoProviderBuiltin::new(&[SIGNING_ALG], None)
@@ -256,10 +292,10 @@ fn issuer_verifying_crypto_provider(directory: &PathBuf) -> SDJWTCryptoProviderB
         .unwrap()
 }
 
-fn get_settings(path: &PathBuf) -> Settings {
+fn get_settings(path: &PathBuf, override_value: Option<&serde_yaml::Value>) -> Settings {
     println!("settings.yaml - {:?}", path);
 
-    Settings::from(path)
+    Settings::from_path_with_override(path, override_value)
 }
 
 fn get_specification_paths(args: &Cli, basedir: PathBuf) -> Result<Vec<PathBuf>> {

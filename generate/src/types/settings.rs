@@ -10,7 +10,7 @@ use serde_yaml::Value;
 pub struct KeySettings {
     pub key_size: i32,
     pub kty: String,
-    pub issuer_key: Key,
+    pub issuer_keys: Vec<Key>,
     pub holder_key: Value,
 }
 
@@ -42,13 +42,27 @@ pub struct Settings {
 
 impl From<&PathBuf> for Settings {
     fn from(path: &PathBuf) -> Self {
+        Settings::from_path_with_override(path, None)
+    }
+}
+
+impl Settings {
+    pub fn from_path_with_override(path: &PathBuf, override_value: Option<&Value>) -> Self {
         let contents = std::fs::read_to_string(path)
             .expect("Failed to read settings file");
 
-        let settings: Settings = serde_yaml::from_str(&contents)
+        let mut base: Value = serde_yaml::from_str(&contents)
             .expect("Failed to parse YAML");
 
-        settings
+        if let Some(Value::Mapping(override_map)) = override_value {
+            if let Value::Mapping(base_map) = &mut base {
+                for (k, v) in override_map {
+                    base_map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        serde_yaml::from_value(base).expect("Failed to parse YAML")
     }
 }
 
@@ -66,12 +80,12 @@ mod tests {
         key_settings:
             key_size: 256
             kty: "EC"
-            issuer_key:
-                kty: "EC"
-                d: "Ur2bNKuBPOrAaxsRnbSH6hIhmNTxSGXshDSUD1a1y7g"
-                crv: "P-256"
-                x: "b28d4MwZMjw8-00CG4xfnn9SLMVMM19SlqZpVb_uNtQ"
-                y: "Xv5zWwuoaTgdS6hV43yI6gBwTnjukmFQQnJ_kCxzqk8"
+            issuer_keys:
+                - kty: "EC"
+                  d: "Ur2bNKuBPOrAaxsRnbSH6hIhmNTxSGXshDSUD1a1y7g"
+                  crv: "P-256"
+                  x: "b28d4MwZMjw8-00CG4xfnn9SLMVMM19SlqZpVb_uNtQ"
+                  y: "Xv5zWwuoaTgdS6hV43yI6gBwTnjukmFQQnJ_kCxzqk8"
             holder_key:
                 kty: "EC"
                 d: "5K5SCos8zf9zRemGGUl6yfok-_NiiryNZsvANWMhF-I"

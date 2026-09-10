@@ -43,12 +43,12 @@ index ad00641..d0299ea 100755
              "json",
          ),
 +        "issuer_key": (
-+            demo_keys["issuer_key"].export_to_pem(True, None).decode("utf-8"),
++            demo_keys["issuer_keys"][0].export_to_pem(True, None).decode("utf-8"),
 +            "Issuer private key",
 +            "pem",
 +        ),
 +        "issuer_public_key": (
-+            demo_keys["issuer_public_key"].export_to_pem(False, None).decode("utf-8"),
++            demo_keys["issuer_keys"][0].export_to_pem(False, None).decode("utf-8"),
 +            "Issuer public key",
 +            "pem",
 +        ),
@@ -95,3 +95,16 @@ index a9727c4..d1f983a 100644
      @property
      def b64(self):
          return self._raw_b64
+diff --git a/src/sd_jwt/utils/formatting.py b/src/sd_jwt/utils/formatting.py
+index e7bc6da..f452dc3 100644
+--- a/src/sd_jwt/utils/formatting.py
++++ b/src/sd_jwt/utils/formatting.py
+@@ -87,6 +87,8 @@ def markdown_decoy_digests(decoy_digests):
+
+ def format_for_testcase(data, ftype):
+     if ftype == "json":
++        if isinstance(data, str):
++            data = json.loads(data)
+         return json.dumps(data, indent=OUTPUT_INDENT, ensure_ascii=OUTPUT_ENSURE_ASCII)
+     else:
+         return data

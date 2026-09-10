@@ -17,6 +17,7 @@ pub struct Specification {
     pub add_decoy_claims: Option<bool>,
     pub key_binding: Option<bool>,
     pub serialization_format: Option<String>,
+    pub settings_override: Option<Value>,
 }
 
 impl Specification {
