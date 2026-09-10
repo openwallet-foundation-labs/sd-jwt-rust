@@ -15,10 +15,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Build interop tool
-      run: cargo build --manifest-path generate/Cargo.toml --verbose
+      - uses: actions/checkout@v3
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+      - name: Run tests (AWS-LC)
+        run: cargo test -F aws_lc_rs --no-default-features --verbose
+      - name: Build interop tool
+        run: cargo build --manifest-path generate/Cargo.toml --verbose

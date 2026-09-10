@@ -4,28 +4,31 @@ version = "0.7.1"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "Rust reference implementation of the IETF SD-JWT specification (v7)."
-rust-version = "1.67.0"
+rust-version = "1.88.0"
 authors = ["Abdulbois Tursunov <abdulbois.tursunov@dsr-corporation.com>, Sergey Minaev <sergey.minaev@dsr-corporation.com>"]
 repository = "https://github.com/openwallet-foundation-labs/sd-jwt-rust"
 documentation = "https://docs.rs/sd-jwt-rs"
 homepage = "https://github.com/openwallet-foundation-labs/sd-jwt-rust"
 
 [features]
+default = ["rust_crypto"]
 mock_salts = ["lazy_static"]
+rust_crypto = ["jsonwebtoken/rust_crypto"]
+aws_lc_rs = ["jsonwebtoken/aws_lc_rs"]
 
 [dependencies]
-base64 = "0.21"
-hmac = "0.12"
-jsonwebtoken = "9.2"
-lazy_static = {  version = "1.4", optional = true }
+base64 = "0.23.1"
+hmac = "0.13.0"
+jsonwebtoken = "11.0.0"
+lazy_static = { version = "1.4", optional = true }
 log = "0.4"
-rand = "0.8"
-serde = { version = "1.0.193", features = ["derive"] }
-serde_json = { version = "1.0.113", features = ["preserve_order"] }
-sha2 = "0.10"
-thiserror = "1.0.51"
-strum = { version = "0.25", default-features = false, features = ["std", "derive"] }
+rand = { version = "0.10.2", features = ["thread_rng"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+strum = { version = "0.28.0", default-features = false, features = ["std", "derive"] }
 
 [dev-dependencies]
-rstest = "0.18.2"
+rstest = "0.27.0"
 regex = "1.10"
