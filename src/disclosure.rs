@@ -25,12 +25,19 @@ impl SDJWTDisclosure {
         let mut value_str = value.to_string();
 
         #[cfg(feature = "mock_salts")]
+        let python_spacing = *crate::utils::MOCK_DISCLOSURE_PYTHON_SPACING.lock().unwrap();
+        #[cfg(not(feature = "mock_salts"))]
+        let python_spacing = true;
+
+        #[cfg(feature = "mock_salts")]
         let salt = {
-            value_str = value_str
-                .replace(":[", ": [")
-                .replace(',', ", ")
-                .replace("\":", "\": ")
-                .replace("\":  ", "\": ");
+            if python_spacing {
+                value_str = value_str
+                    .replace(":[", ": [")
+                    .replace(',', ", ")
+                    .replace("\":", "\": ")
+                    .replace("\":  ", "\": ");
+            }
             generate_salt_mock()
         };
 
@@ -38,10 +45,16 @@ impl SDJWTDisclosure {
             value_str = escape_unicode_chars(&value_str);
         }
 
-        let data = if let Some(key) = &key {
-            format!(r#"["{}", {}, {}]"#, salt, escape_json(key), value_str)
-        } else {
-            format!(r#"["{}", {}]"#, salt, value_str)
+        // The outer [salt, key, value] separators are independent of
+        // value_str's own (possibly re-spaced above) formatting: production
+        // use and the Python-reference interop always match sd-jwt-python's
+        // `json.dumps` separators (", " / ": "); the JS-reference interop
+        // needs `JSON.stringify`'s fully compact separators instead.
+        let data = match (&key, python_spacing) {
+            (Some(key), true) => format!(r#"["{}", {}, {}]"#, salt, escape_json(key), value_str),
+            (Some(key), false) => format!(r#"["{}",{},{}]"#, salt, escape_json(key), value_str),
+            (None, true) => format!(r#"["{}", {}]"#, salt, value_str),
+            (None, false) => format!(r#"["{}",{}]"#, salt, value_str),
         };
 
         let raw_b64 = base64url_encode(data.as_bytes());

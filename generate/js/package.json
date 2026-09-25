@@ -1,0 +1,13 @@
+{
+  "name": "sd-jwt-js-generate",
+  "private": true,
+  "type": "module",
+  "description": "Generates sd-jwt-rust interop fixtures using sd-jwt-js as the reference implementation.",
+  "scripts": {
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "@sd-jwt/core": "0.20.1",
+    "js-yaml": "5.4.1"
+  }
+}

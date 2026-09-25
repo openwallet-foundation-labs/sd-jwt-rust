@@ -21,6 +21,15 @@ use std::{collections::VecDeque, sync::Mutex};
 #[cfg(feature = "mock_salts")]
 lazy_static! {
     pub static ref SALTS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+    // Whether disclosure JSON is re-spaced to match sd-jwt-python's `json.dumps` separators
+    // (", " / ": ") before hashing. Needed so digests match a Python-generated reference;
+    // must be turned off for references (e.g. sd-jwt-js) that serialize compactly.
+    pub static ref MOCK_DISCLOSURE_PYTHON_SPACING: Mutex<bool> = Mutex::new(true);
+}
+
+#[cfg(feature = "mock_salts")]
+pub fn set_mock_disclosure_python_spacing(enabled: bool) {
+    *MOCK_DISCLOSURE_PYTHON_SPACING.lock().unwrap() = enabled;
 }
 
 #[doc(hidden)]

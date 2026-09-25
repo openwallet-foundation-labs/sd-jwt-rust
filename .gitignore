@@ -20,3 +20,9 @@ Cargo.lock
 
 # Local checkout path written by generate/setup_sd_jwt_python.sh
 .sd-jwt-py-path
+
+# Fixture tree path written by generate/setup_sd_jwt_js.sh
+.sd-jwt-js-path
+
+# npm dependencies for generate/js
+generate/js/node_modules/

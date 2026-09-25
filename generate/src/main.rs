@@ -19,7 +19,7 @@ use sd_jwt_rs::SDJWTSerializationFormat;
 use sd_jwt_rs::{SDJWTCryptoProviderBuiltin, SDJWTKeyWithAlg};
 use serde_json::{Number, Value};
 use std::path::PathBuf;
-use types::cli::{Cli, GenerateType};
+use types::cli::{Cli, GenerateType, Reference};
 use types::settings::Settings;
 use types::specification::Specification;
 
@@ -38,6 +38,8 @@ fn main() {
     let args = Cli::parse();
 
     println!("type_: {:?}, paths: {:?}", args.type_.clone(), args.paths);
+
+    sd_jwt_rs::utils::set_mock_disclosure_python_spacing(matches!(args.reference, Reference::Python));
 
     let basedir = std::env::current_dir().expect("Unable to get current directory");
     let spec_directories = get_specification_paths(&args, basedir).unwrap();
