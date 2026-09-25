@@ -286,7 +286,7 @@ impl SDJWTIssuer {
 
         if self.add_decoy_claims {
             let num_decoy_elements =
-                rand::thread_rng().gen_range(Self::DECOY_MIN_ELEMENTS..Self::DECOY_MAX_ELEMENTS);
+                rand::random_range(Self::DECOY_MIN_ELEMENTS..Self::DECOY_MAX_ELEMENTS);
             for _ in 0..num_decoy_elements {
                 sd_claims.push(self.create_decoy_claim_entry());
             }

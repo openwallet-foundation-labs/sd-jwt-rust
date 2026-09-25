@@ -12,7 +12,7 @@ use error::Result;
 #[cfg(feature = "mock_salts")]
 use lazy_static::lazy_static;
 use rand::prelude::ThreadRng;
-use rand::RngCore;
+use rand::Rng;
 use serde_json::Value;
 use sha2::Digest;
 #[cfg(feature = "mock_salts")]
