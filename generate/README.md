@@ -1,8 +1,7 @@
 # SD-JWT Interop tool
 
-This tool is used to verify interoperability between `sd-jwt-rust` and the `sd-jwt-python` and `sd-jwt-js`
-implementations of the
-[IETF SD-JWT specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-selective-disclosure-jwt/).
+This tool is used to verify interoperability between the `sd-jwt-rust` and `sd-jwt-python` implementations of
+the [IETF SD-JWT specification (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901.html).
 
 ## How does the Interop tool work?
 
@@ -60,7 +59,7 @@ disclosure's value under `mock_salts`, so the digest it computes lines up with t
 ### 'Decoy' SD items
 
 In order to make it possible to compare `SD-JWT` payloads that
-contains [decoy](https://www.ietf.org/archive/id/draft-ietf-oauth-selective-disclosure-jwt-07.html#name-decoy-digests).
+contains [decoy](https://www.rfc-editor.org/rfc/rfc9901.html#decoy_digests) (RFC 9901 §4.2.5).
 it was decided to detect and remove all `decoy` items from payloads and then compare them.
 
 ## How to use the interop tool?
