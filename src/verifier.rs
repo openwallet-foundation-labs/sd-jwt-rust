@@ -207,7 +207,7 @@ impl SDJWTVerifier {
         let claims: Value = self.sd_jwt_payload.clone().into_iter().collect();
         let unpacked = self.unpack_disclosed_claims(&claims)?;
 
-        // Draft-07 section 8.1 step 5: if any presented Disclosure was not
+        // RFC 9901 §7.1 step 5: if any presented Disclosure was not
         // referenced by digest value in the Issuer-signed JWT (directly or
         // recursively via other Disclosures), the SD-JWT MUST be rejected.
         // `duplicate_hash_check` accumulates every digest encountered during
@@ -1029,9 +1029,9 @@ mod tests {
         // Tamper: inject a syntactically-valid extra disclosure into the presentation.
         // The KB-JWT's sd_hash was computed by the holder over the original disclosure
         // list, so the verifier MUST detect the mismatch. Where the disclosure goes
-        // differs by format: a `~`-separated segment before the KB-JWT (Compact §4),
-        // a top-level `header` member (Flattened §8.2), or the first signature's
-        // header (General §8.3).
+        // differs by format: a `~`-separated segment before the KB-JWT (RFC 9901 §4),
+        // a top-level `header` member (RFC 9901 §8.2, Flattened), or the first signature's
+        // header (RFC 9901 §8.3, General).
         let injected_disclosure =
             base64url_encode(br#"["injectedsalt", "injected_claim", "value"]"#);
         let tampered = match format {
@@ -1153,7 +1153,7 @@ mod tests {
 
         // Tamper: re-sign the KB-JWT with the `iat` claim stripped from the
         // payload. The KB-JWT remains validly signed by the holder key, so
-        // signature verification will pass — but the spec requires `iat` to
+        // signature verification will pass — but RFC 9901 §4.3 requires `iat` to
         // be present, and the verifier must reject this presentation.
         let mut json: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
         let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
@@ -1226,7 +1226,7 @@ mod tests {
         .unwrap();
 
         // Tamper: re-sign the KB-JWT with a far-future `iat`. The signature is
-        // valid, but §7.3 requires the creation time to be within an acceptable
+        // valid, but RFC 9901 §7.3 requires the creation time to be within an acceptable
         // window, so the verifier must reject it.
         let mut json: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
         let original_kb_jwt = json.header.kb_jwt.clone().unwrap();
@@ -1644,7 +1644,7 @@ mod tests {
         // Append a syntactically-valid but unreferenced disclosure. The
         // legitimate disclosures still hash and unpack normally; only the
         // injected disclosure is not referenced by any digest in the
-        // Issuer-signed JWT, so the verifier must reject per draft-07 §8.1.
+        // Issuer-signed JWT, so the verifier must reject per RFC 9901 §7.1.
         let injected = base64url_encode(br#"["unreferencedsalt", "unreferenced_claim", "value"]"#);
         let presentation = presentation.trim_end_matches(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
         let tampered = format!(
@@ -1707,7 +1707,7 @@ mod tests {
         let issuer_key = es256_signing_key();
         for reserved in ["_sd", "..."] {
             // A well-formed (3-element) Disclosure that discloses a claim named
-            // `_sd` or `...`; §7.1 requires the Verifier to reject it.
+            // `_sd` or `...`; RFC 9901 §7.1 requires the Verifier to reject it.
             let disclosure =
                 base64url_encode(format!(r#"["salt", "{reserved}", "value"]"#).as_bytes());
             let digest = base64_hash(disclosure.as_bytes());

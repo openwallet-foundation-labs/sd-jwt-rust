@@ -292,8 +292,9 @@ function escapeNonAsciiJson(jsonText) {
     return out;
 }
 
-// Builds one disclosure (RFC 9901 §5.2): `[salt, value]` for an array
-// element, `[salt, key, value]` for an object property.
+// Builds one disclosure (RFC 9901 §4.2):
+// - `[salt, value]` for an array element,
+// - `[salt, key, value]` for an object property.
 function makeDisclosure(salt, key, value) {
     const valueJson = escapeNonAsciiJson(jsonStringify(value));
     const data = key === undefined ? `["${salt}",${valueJson}]` : `["${salt}",${jsonStringify(key)},${valueJson}]`;
