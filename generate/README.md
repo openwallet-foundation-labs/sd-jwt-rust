@@ -1,7 +1,7 @@
 # SD-JWT Interop tool
 
-This tool is used to verify interoperability between the `sd-jwt-rust` and `sd-jwt-python` implementations of
-the [IETF SD-JWT specification (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901.html).
+This tool is used to verify interoperability between the `sd-jwt-rust` and `sd-jwt-python` and `sd-jwt-js`
+implementations of the [IETF SD-JWT specification (RFC 9901)](https://www.rfc-editor.org/rfc/rfc9901.html).
 
 ## How does the Interop tool work?
 
@@ -45,10 +45,10 @@ of different number of spaces:
 
 ```rust
 value_str = value_str
-  .replace(":[", ": [")
-  .replace(',', ", ")
-  .replace("\":", "\": ")
-  .replace("\":  ", "\": ");
+.replace(":[", ": [")
+.replace(',', ", ")
+.replace("\":", "\": ")
+.replace("\":  ", "\": ");
 ```
 
 `sd-jwt-python`'s `json.dumps` puts a space after `:` and `,`; `sd-jwt-js`'s `JSON.stringify` doesn't. The `--reference`
