@@ -52,6 +52,10 @@ pub fn base64url_decode(b64data: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::DeserializationError(e.to_string()))
 }
 
+pub(crate) fn base64_standard_encode(data: &[u8]) -> String {
+    general_purpose::STANDARD.encode(data)
+}
+
 pub(crate) fn base64_standard_decode(b64data: &str) -> Result<Vec<u8>> {
     general_purpose::STANDARD
         .decode(b64data)

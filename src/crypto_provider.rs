@@ -4,12 +4,13 @@
 
 use crate::error::{Error, Result};
 use crate::utils::{base64url_decode, base64url_encode};
+use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// Which signature a [SDJWTCryptoProvider] call concerns.
+/// Which signature an [SDJWTSignatureVerifier] call concerns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SDJWTSignatureRole {
     /// The signature over the Issuer-signed JWT, made with the Issuer's key.
@@ -18,10 +19,10 @@ pub enum SDJWTSignatureRole {
     KeyBindingJwt,
 }
 
-/// Material the library extracts from a JWT for a [SDJWTCryptoProvider] to
-/// select the verification key. Every field is unverified, attacker-controlled
+/// Material the library extracts from a JWT for an [SDJWTSignatureVerifier]
+/// to select the verification key. Every field is unverified, attacker-controlled
 /// input: a successful `verify` asserts that the signature was checked against
-/// a key trusted for the signer these fields claim. A provider that requires a
+/// a key trusted for the signer these fields claim. A verifier that requires a
 /// known issuer should scope its key lookup by `iss` and reject `iss == None`;
 /// use `x5c` only after validating the chain to a trust anchor; return an
 /// error (e.g. [Error::KeyNotFound]) for an unknown issuer or key.
@@ -32,73 +33,102 @@ pub struct SDJWTKeyRequest {
     pub role: SDJWTSignatureRole,
     /// Unverified `iss` claim from the payload, if present.
     pub iss: Option<String>,
-    /// `kid` from the protected header, if present.
+    /// `kid` from the protected header or, failing that, from the JWS JSON
+    /// unprotected header — the latter is not integrity protected.
     pub kid: Option<String>,
     /// JWS `alg` wire name from the protected header (e.g. "ES256"), passed
-    /// through raw so crypto providers may support algorithms the library does not.
+    /// through raw so verifiers may support algorithms the library does not.
     pub alg: String,
     /// X.509 certificate chain from the protected header (`x5c`),
     /// base64-decoded to DER.
     pub x5c: Option<Vec<Vec<u8>>>,
-    /// [SDJWTSignatureRole::KeyBindingJwt] only: the Holder's public key from the
-    /// verified Issuer payload's `cnf`, as a JWK JSON string.
+    /// The signer's public key as a JWK JSON string: for
+    /// [SDJWTSignatureRole::IssuerJwt] the protected header `jwk` — trust it
+    /// only after matching it to a trusted key; for
+    /// [SDJWTSignatureRole::KeyBindingJwt] the Holder's key from the verified
+    /// Issuer payload's `cnf`.
     pub jwk: Option<String>,
 }
 
-/// Signing and verification behind one injectable interface, so key storage and
-/// crypto can live outside the library (e.g. platform keystores reached over
-/// FFI, where keys are non-extractable and only operations cross the
-/// boundary). `message` is always the raw JWS signing input
-/// (`BASE64URL(header) . BASE64URL(payload)` as bytes); signatures are raw
-/// bytes — the library owns all JWS encoding and decoding.
+/// Signs JWSs with one key, so key storage and crypto can live outside the
+/// library (e.g. platform keystores reached over FFI, where keys are
+/// non-extractable and only operations cross the boundary). `message` is the
+/// raw JWS signing input (`BASE64URL(header).BASE64URL(payload)` as bytes);
+/// the signature is raw bytes — the library owns all JWS encoding.
 ///
-/// The methods form two pairs — signing ([Self::signing_alg] + [Self::sign])
-/// and verifying ([Self::allowed_verifying_algs] + [Self::verify]) — and each
-/// pair has a fail-closed default returning [Error::KeyNotFound], so a
-/// provider implements only the pair(s) its party performs. `Send + Sync` so
-/// an injected provider can be held by an issuer/holder/verifier shared
-/// across threads.
-pub trait SDJWTCryptoProvider: Send + Sync {
-    /// JWS `alg` wire name that `sign(role)` produces.
-    /// Defaults to an error for providers that do not sign.
-    fn signing_alg(&self, role: SDJWTSignatureRole) -> Result<String> {
-        Err(Error::KeyNotFound(format!(
-            "this crypto provider does not implement signing ({role:?})"
-        )))
+/// An Issuer signs with one signer per signature (see [crate::SDJWTIssuer::add_signature]);
+/// a Holder signs Key Binding JWTs with its own signer.
+pub trait SDJWTSigner: Send + Sync {
+    /// Header parameters the library writes to the protected header of every
+    /// JWS this signer signs: the `alg` of [Self::sign] and the parameters
+    /// identifying its key.
+    fn header(&self) -> Result<SDJWTSignerHeader>;
+    /// Sign `message` with this signer's key.
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>>;
+}
+
+/// An [SDJWTSigner]'s protected header parameters
+/// that may be used for verification key and algorithm detection.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SDJWTSignerHeader {
+    /// JWS `alg` name of the signatures the signer produces.
+    pub alg: String,
+    /// `kid` of the signing key.
+    pub kid: Option<String>,
+    /// X.509 certificate chain of the signing key, DER-encoded, leaf first.
+    pub x5c: Option<Vec<Vec<u8>>>,
+    /// Public key of the signing key.
+    pub jwk: Option<Jwk>,
+}
+
+impl SDJWTSignerHeader {
+    /// A header with `alg` and no key-identifying parameters.
+    pub fn new(alg: &str) -> Self {
+        Self {
+            alg: alg.to_owned(),
+            kid: None,
+            x5c: None,
+            jwk: None,
+        }
     }
-    /// JWS `alg` values this provider accepts when verifying a `role`
-    /// signature — the RFC 8725 §3.1 algorithm allowlist. The library
-    /// rejects a JWT whose header `alg` is not in this list *before* calling
-    /// [SDJWTCryptoProvider::verify], so the (attacker-controlled) header
-    /// never selects the algorithm.
-    /// Defaults to an error for providers that do not verify.
-    fn allowed_verifying_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
-        Err(Error::KeyNotFound(format!(
-            "this crypto provider does not implement verification ({role:?})"
-        )))
+
+    /// Identify the key by `kid`.
+    pub fn with_kid(mut self, kid: &str) -> Self {
+        self.kid = Some(kid.to_owned());
+        self
     }
-    /// Sign `message` with the key this crypto provider holds for `role`.
-    /// Defaults to an error for providers that do not sign.
-    fn sign(&self, _message: &[u8], role: SDJWTSignatureRole) -> Result<Vec<u8>> {
-        Err(Error::KeyNotFound(format!(
-            "this crypto provider does not implement signing ({role:?})"
-        )))
+
+    /// Identify the key by its DER-encoded certificate chain, leaf first.
+    pub fn with_x5c(mut self, x5c: Vec<Vec<u8>>) -> Self {
+        self.x5c = Some(x5c);
+        self
     }
+
+    /// Identify the key by its public JWK.
+    pub fn with_jwk(mut self, jwk: Jwk) -> Self {
+        self.jwk = Some(jwk);
+        self
+    }
+}
+
+/// Verifies JWS signatures, one per call: the Issuer's over the
+/// Issuer-signed JWT and the Holder's over the Key Binding JWT.
+/// `message` is the raw JWS signing input; `signature` is raw bytes.
+/// Key selection and trust are the implementation's responsibility, see [SDJWTKeyRequest].
+pub trait SDJWTSignatureVerifier: Send + Sync {
+    /// JWS `alg` values accepted when verifying a `role` signature — the
+    /// RFC 8725 §3.1 algorithm allowlist.
+    /// JWT whose header `alg` is not in this list is rejected.
+    fn allowed_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>>;
     /// Verify `signature` over `message` for the signer `request` describes.
-    /// Key selection AND trust are the implementation's responsibility.
-    /// Defaults to an error for providers that do not verify.
-    fn verify(&self, _message: &[u8], _signature: &[u8], request: &SDJWTKeyRequest) -> Result<()> {
-        Err(Error::KeyNotFound(format!(
-            "this crypto provider does not implement verification ({:?})",
-            request.role
-        )))
-    }
+    fn verify(&self, message: &[u8], signature: &[u8], request: &SDJWTKeyRequest) -> Result<()>;
 }
 
 /// A key bundled with the JWS `alg` wire name (e.g. `"ES256"`) it is used
 /// with — each key is used with exactly one algorithm (RFC 8725 §3.1).
 /// Whether the `alg` is acceptable is checked where the pair is bound to a
-/// provider, against that provider's declared policy — not here.
+/// signer or verifier — not here.
 pub struct SDJWTKeyWithAlg<K> {
     key: K,
     alg: String,
@@ -115,35 +145,85 @@ impl<K> SDJWTKeyWithAlg<K> {
     }
 }
 
-/// Software crypto provider over jsonwebtoken. The algorithm policy is
+/// Software signer over jsonwebtoken: one in-memory key under its one
+/// algorithm, plus the header parameters identifying it.
+pub struct SDJWTSignerBuiltin {
+    key: SDJWTKeyWithAlg<EncodingKey>,
+    header: SDJWTSignerHeader,
+}
+
+impl SDJWTSignerBuiltin {
+    /// Sign with `key` under the algorithm bundled with it. Fails at
+    /// configuration time if that algorithm is one SD-JWT never accepts
+    /// (`none`, symmetric `HS*`) or jsonwebtoken does not know.
+    pub fn new(key: SDJWTKeyWithAlg<EncodingKey>) -> Result<Self> {
+        reject_unacceptable_alg(&key.alg)?;
+        Algorithm::from_str(&key.alg).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        Ok(Self {
+            header: SDJWTSignerHeader::new(&key.alg),
+            key,
+        })
+    }
+
+    /// Write `kid` to the protected header of every JWS this signer signs.
+    pub fn with_kid(mut self, kid: &str) -> Self {
+        self.header = self.header.with_kid(kid);
+        self
+    }
+
+    /// Write `x5c` (DER-encoded, leaf first) to the protected header of
+    /// every JWS this signer signs.
+    pub fn with_x5c(mut self, x5c: Vec<Vec<u8>>) -> Self {
+        self.header = self.header.with_x5c(x5c);
+        self
+    }
+
+    /// Write `jwk` to the protected header of every JWS this signer signs.
+    pub fn with_jwk(mut self, jwk: Jwk) -> Self {
+        self.header = self.header.with_jwk(jwk);
+        self
+    }
+}
+
+impl SDJWTSigner for SDJWTSignerBuiltin {
+    fn header(&self) -> Result<SDJWTSignerHeader> {
+        Ok(self.header.clone())
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let algorithm = Algorithm::from_str(&self.key.alg)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let signature = jsonwebtoken::crypto::sign(message, &self.key.key, algorithm)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        base64url_decode(&signature)
+    }
+}
+
+/// Software signature verifier over jsonwebtoken. The algorithm policy is
 /// declared once, at construction ([Self::new]), and every key bound
 /// afterwards carries exactly one JWS algorithm inside that policy. The
 /// Issuer JWT is verified with a pinned Issuer key — a `kid`-keyed set for
-/// rotation, a default key, or both — under that key's bound algorithm; the
-/// Key Binding JWT is verified with the in-band `cnf` key from the request.
-/// A symmetric (`HS*`) `alg` is rejected outright in both cases.
-pub struct SDJWTCryptoProviderBuiltin {
-    issuer_signing: Option<SDJWTKeyWithAlg<EncodingKey>>,
-    holder_signing: Option<SDJWTKeyWithAlg<EncodingKey>>,
+/// rotation or co-signers, a default key, or both — under that key's bound
+/// algorithm; the Key Binding JWT is verified with the in-band `cnf` key from
+/// the request. A symmetric (`HS*`) `alg` is rejected outright in both cases.
+pub struct SDJWTSignatureVerifierBuiltin {
     issuer_verifying: Option<SDJWTKeyWithAlg<DecodingKey>>,
     issuer_verifying_by_kid: HashMap<String, SDJWTKeyWithAlg<DecodingKey>>,
     allowed_issuer_signing_algs: Vec<String>,
     allowed_holder_signing_algs: Option<Vec<String>>,
 }
 
-impl SDJWTCryptoProviderBuiltin {
-    /// A crypto provider holding the declared algorithm policy and no keys
-    /// yet. `allowed_issuer_signing_algs` is the allowlist for the Issuer's
+impl SDJWTSignatureVerifierBuiltin {
+    /// A verifier holding the declared algorithm policy and no keys yet.
+    /// `allowed_issuer_signing_algs` is the allowlist for the Issuer's
     /// signature; `allowed_holder_signing_algs` is the Key Binding
-    /// counterpart — `None` for a provider that neither signs nor verifies
-    /// Key Binding JWTs (KB verification then fails closed).
+    /// counterpart — `None` for a verifier that does not verify Key Binding
+    /// JWTs (KB verification then fails closed).
     pub fn new(
         allowed_issuer_signing_algs: &[&str],
         allowed_holder_signing_algs: Option<&[&str]>,
     ) -> Self {
         Self {
-            issuer_signing: None,
-            holder_signing: None,
             issuer_verifying: None,
             issuer_verifying_by_kid: HashMap::new(),
             allowed_issuer_signing_algs: allowed_issuer_signing_algs
@@ -155,55 +235,14 @@ impl SDJWTCryptoProviderBuiltin {
         }
     }
 
-    /// Sign Issuer JWTs with the Issuer's `key`, under the algorithm bundled
-    /// with it. Binding fails at configuration time if that algorithm is one
-    /// SD-JWT never accepts (`none`, symmetric `HS*`) or is outside the
-    /// issuer allowlist declared at [Self::new].
-    pub fn with_issuer_signing_key(mut self, key: SDJWTKeyWithAlg<EncodingKey>) -> Result<Self> {
-        reject_unacceptable_alg(&key.alg)?;
-        if !self
-            .allowed_issuer_signing_algs
-            .iter()
-            .any(|allowed_alg| allowed_alg == &key.alg)
-        {
-            return Err(Error::InvalidInput(format!(
-                "issuer signing key algorithm \"{}\" is outside the allowed issuer signing algorithms",
-                key.alg
-            )));
-        }
-        self.issuer_signing = Some(key);
-        Ok(self)
-    }
-
-    /// Sign Key Binding JWTs with the Holder's `key`, under the algorithm
-    /// bundled with it. Binding fails at configuration time if the Key
-    /// Binding allowlist was not declared at [Self::new], excludes that
-    /// algorithm, or the algorithm is one SD-JWT never accepts (`none`,
-    /// symmetric `HS*`).
-    pub fn with_holder_signing_key(mut self, key: SDJWTKeyWithAlg<EncodingKey>) -> Result<Self> {
-        reject_unacceptable_alg(&key.alg)?;
-        let allowed = self.allowed_holder_signing_algs.as_ref().ok_or_else(|| {
-            Error::InvalidInput(
-                "allowed holder signing algorithms must be declared to bind a holder signing key"
-                    .to_string(),
-            )
-        })?;
-        if !allowed.iter().any(|allowed_alg| allowed_alg == &key.alg) {
-            return Err(Error::InvalidInput(format!(
-                "holder signing key algorithm \"{}\" is outside the allowed holder signing algorithms",
-                key.alg
-            )));
-        }
-        self.holder_signing = Some(key);
-        Ok(self)
-    }
-
     /// Verify Issuer JWTs with the Issuer's public `key`, under exactly the
     /// algorithm bundled with it — a JWT whose header `alg` differs is
     /// rejected before the cryptographic operation. This is the default key:
     /// a token whose `kid` matches no [Self::with_issuer_verifying_key_for_kid]
-    /// entry (or that carries no `kid`) verifies against it. The same
-    /// configuration-time policy checks apply as for signing keys.
+    /// entry (or that carries no `kid`) verifies against it. Binding fails at
+    /// configuration time if the key's algorithm is one SD-JWT never accepts
+    /// (`none`, symmetric `HS*`) or is outside the issuer allowlist declared
+    /// at [Self::new].
     pub fn with_issuer_verifying_key(mut self, key: SDJWTKeyWithAlg<DecodingKey>) -> Result<Self> {
         self.issuer_verifying = Some(self.issuer_verifying_entry(key)?);
         Ok(self)
@@ -247,29 +286,10 @@ impl SDJWTCryptoProviderBuiltin {
     }
 }
 
-impl SDJWTCryptoProviderBuiltin {
-    /// The signing key configured for `role`, or an error naming the
-    /// missing configuration.
-    fn signing_for(&self, role: SDJWTSignatureRole) -> Result<&SDJWTKeyWithAlg<EncodingKey>> {
-        match role {
-            SDJWTSignatureRole::IssuerJwt => self.issuer_signing.as_ref().ok_or(
-                Error::KeyNotFound("no issuer signing key configured".to_string()),
-            ),
-            SDJWTSignatureRole::KeyBindingJwt => self.holder_signing.as_ref().ok_or(
-                Error::KeyNotFound("no holder signing key configured".to_string()),
-            ),
-        }
-    }
-}
-
-impl SDJWTCryptoProvider for SDJWTCryptoProviderBuiltin {
-    fn signing_alg(&self, role: SDJWTSignatureRole) -> Result<String> {
-        self.signing_for(role).map(|s| s.alg.clone())
-    }
-
+impl SDJWTSignatureVerifier for SDJWTSignatureVerifierBuiltin {
     /// The policy declared at [Self::new] for `role`. The Key Binding list
     /// is optional there: undeclared, KB verification fails closed.
-    fn allowed_verifying_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
+    fn allowed_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
         match role {
             SDJWTSignatureRole::IssuerJwt => Ok(self.allowed_issuer_signing_algs.clone()),
             SDJWTSignatureRole::KeyBindingJwt => {
@@ -280,15 +300,6 @@ impl SDJWTCryptoProvider for SDJWTCryptoProviderBuiltin {
                     ))
             }
         }
-    }
-
-    fn sign(&self, message: &[u8], role: SDJWTSignatureRole) -> Result<Vec<u8>> {
-        let signing = self.signing_for(role)?;
-        let algorithm = Algorithm::from_str(&signing.alg)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        let signature = jsonwebtoken::crypto::sign(message, &signing.key, algorithm)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        base64url_decode(&signature)
     }
 
     fn verify(&self, message: &[u8], signature: &[u8], request: &SDJWTKeyRequest) -> Result<()> {
@@ -403,24 +414,39 @@ pub(crate) fn reject_unacceptable_alg(alg: &str) -> Result<()> {
     Ok(())
 }
 
-/// Serialize `header` and `payload` and sign them via `crypto_provider` into
-/// a compact JWS.
+/// The protected header of a JWS `signer` signs: its `alg` (rejected if
+/// unacceptable, see [crate::ProtectedHeader::new]) and key-identifying
+/// parameters, plus `typ`.
+pub(crate) fn signer_protected_header(
+    signer: &dyn SDJWTSigner,
+    typ: Option<String>,
+) -> Result<crate::ProtectedHeader> {
+    crate::ProtectedHeader::from_signer(signer.header()?, typ)
+}
+
+/// Serialize `header` and `payload` and sign them with `signer` into a
+/// compact JWS.
 pub(crate) fn encode_jws(
     header: &crate::ProtectedHeader,
     payload: &impl Serialize,
-    crypto_provider: &dyn SDJWTCryptoProvider,
-    role: SDJWTSignatureRole,
+    signer: &dyn SDJWTSigner,
+) -> Result<String> {
+    let payload =
+        serde_json::to_string(payload).map_err(|e| Error::DeserializationError(e.to_string()))?;
+    sign_encoded_payload(header, &base64url_encode(payload.as_bytes()), signer)
+}
+
+/// Sign an already base64url-encoded `payload` under `header` with `signer`
+/// into a compact JWS.
+pub(crate) fn sign_encoded_payload(
+    header: &crate::ProtectedHeader,
+    payload: &str,
+    signer: &dyn SDJWTSigner,
 ) -> Result<String> {
     let header =
         serde_json::to_string(header).map_err(|e| Error::DeserializationError(e.to_string()))?;
-    let payload =
-        serde_json::to_string(payload).map_err(|e| Error::DeserializationError(e.to_string()))?;
-    let message = format!(
-        "{}.{}",
-        base64url_encode(header.as_bytes()),
-        base64url_encode(payload.as_bytes())
-    );
-    let signature = crypto_provider.sign(message.as_bytes(), role)?;
+    let message = format!("{}.{payload}", base64url_encode(header.as_bytes()));
+    let signature = signer.sign(message.as_bytes())?;
     Ok(format!("{message}.{}", base64url_encode(&signature)))
 }
 
@@ -451,16 +477,18 @@ mod tests {
         DecodingKey::from_ec_pem(PUBLIC_ISSUER_PEM.as_bytes()).unwrap()
     }
 
+    fn es256_signer() -> SDJWTSignerBuiltin {
+        SDJWTSignerBuiltin::new(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256")).unwrap()
+    }
+
     #[test]
     fn builtin_sign_verify_round_trip() {
-        let signer = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let signer = es256_signer();
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         let message = b"header.payload";
-        let signature = signer.sign(message, SDJWTSignatureRole::IssuerJwt).unwrap();
+        let signature = signer.sign(message).unwrap();
         assert!(verifier
             .verify(message, &signature, &request("ES256"))
             .is_ok());
@@ -473,7 +501,7 @@ mod tests {
 
     #[test]
     fn builtin_rejects_algorithm_outside_issuer_allowlist() {
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         let err = verifier.verify(b"m", b"s", &request("HS256")).unwrap_err();
@@ -488,14 +516,12 @@ mod tests {
         // jsonwebtoken would otherwise report a signature/key mismatch
         // instead. The matching alg is the positive control: an explicit
         // list narrows, but never blocks, the bound algorithm.
-        let signer = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256", "ES384"], None)
+        let signer = es256_signer();
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256", "ES384"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         let message = b"header.payload";
-        let signature = signer.sign(message, SDJWTSignatureRole::IssuerJwt).unwrap();
+        let signature = signer.sign(message).unwrap();
         assert!(verifier
             .verify(message, &signature, &request("ES256"))
             .is_ok());
@@ -514,7 +540,7 @@ mod tests {
         // A bound algorithm outside the policy declared at construction
         // could never verify anything — binding it fails at configuration
         // time instead of failing every verification later.
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES384"], None)
+        let err = SDJWTSignatureVerifierBuiltin::new(&["ES384"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .err()
             .unwrap();
@@ -530,13 +556,11 @@ mod tests {
         // The header `kid` selects among the pre-trusted pinned keys; an
         // unknown `kid` falls back to the default key when one is bound and
         // fails otherwise — trust never leaves the registered set.
-        let signer = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
+        let signer = es256_signer();
         let message = b"header.payload";
-        let signature = signer.sign(message, SDJWTSignatureRole::IssuerJwt).unwrap();
+        let signature = signer.sign(message).unwrap();
 
-        let kid_only = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let kid_only = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key_for_kid(
                 "issuer-key-1",
                 SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"),
@@ -555,7 +579,7 @@ mod tests {
         req.kid = None;
         assert!(kid_only.verify(message, &signature, &req).is_err());
 
-        let with_default = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let with_default = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap()
             .with_issuer_verifying_key_for_kid(
@@ -572,7 +596,7 @@ mod tests {
         // Each key-set entry keeps one-key-one-alg: selecting a key by `kid`
         // also selects its bound algorithm, and the declared policy gates
         // every entry at registration.
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256", "ES384"], None)
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256", "ES384"], None)
             .with_issuer_verifying_key_for_kid(
                 "es384-key",
                 SDJWTKeyWithAlg::new(es256_verifying_key(), "ES384"),
@@ -586,7 +610,7 @@ mod tests {
                 .contains("does not match the issuer verifying key's algorithm"),
             "got: {err}"
         );
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let err = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key_for_kid(
                 "k",
                 SDJWTKeyWithAlg::new(es256_verifying_key(), "ES384"),
@@ -601,35 +625,19 @@ mod tests {
     }
 
     #[test]
-    fn builtin_rejects_contradictory_signing_key_and_allowlist() {
-        // The declared policy also guards the party's own signing keys: a
-        // provider must not mint tokens its declared policy rejects.
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES384"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .err()
-            .unwrap();
-        assert!(
-            err.to_string()
-                .contains("issuer signing key algorithm \"ES256\" is outside"),
-            "got: {err}"
-        );
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["EdDSA"]))
-            .with_holder_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .err()
-            .unwrap();
-        assert!(
-            err.to_string()
-                .contains("holder signing key algorithm \"ES256\" is outside"),
-            "got: {err}"
-        );
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(
-                EncodingKey::from_secret(b"secret"),
-                "HS256",
-            ))
-            .err()
-            .unwrap();
+    fn builtin_signer_rejects_unusable_alg() {
+        // A signer must not mint tokens SD-JWT never accepts (`none`, symmetric `HS*`)
+        // or under an algorithm jsonwebtoken does not know.
+        let err = SDJWTSignerBuiltin::new(SDJWTKeyWithAlg::new(
+            EncodingKey::from_secret(b"secret"),
+            "HS256",
+        ))
+        .err()
+        .unwrap();
         assert!(err.to_string().contains("not acceptable"), "got: {err}");
+        assert!(
+            SDJWTSignerBuiltin::new(SDJWTKeyWithAlg::new(es256_signing_key(), "XS256")).is_err()
+        );
     }
 
     #[test]
@@ -638,8 +646,8 @@ mod tests {
         // error — the guards elsewhere keep it harmless: no key binds within
         // an empty list, and `none`/HS* entries are dead because headers and
         // key bindings reject those algorithms regardless of any list.
-        let err = SDJWTCryptoProviderBuiltin::new(&[], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
+        let err = SDJWTSignatureVerifierBuiltin::new(&[], None)
+            .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .err()
             .unwrap();
         assert!(
@@ -647,15 +655,7 @@ mod tests {
                 .contains("outside the allowed issuer signing algorithms"),
             "got: {err}"
         );
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["HS256"]))
-            .with_holder_signing_key(SDJWTKeyWithAlg::new(
-                EncodingKey::from_secret(b"secret"),
-                "HS256",
-            ))
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("not acceptable"), "got: {err}");
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let err = SDJWTSignatureVerifierBuiltin::new(&["HS256"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "HS256"))
             .err()
             .unwrap();
@@ -664,20 +664,10 @@ mod tests {
 
     #[test]
     fn builtin_requires_declared_holder_allowlist() {
-        // The issuer allowlist is a construction parameter and so can never
-        // be missing; the Key Binding list is optional — undeclared, binding
-        // a holder signing key fails and KB verification fails closed.
-        let err = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_holder_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .err()
-            .unwrap();
-        assert!(
-            err.to_string()
-                .contains("must be declared to bind a holder signing key"),
-            "got: {err}"
-        );
-        assert!(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .allowed_verifying_algs(SDJWTSignatureRole::KeyBindingJwt)
+        // The issuer allowlist is a construction parameter and so can never be missing;
+        // the Key Binding list is optional — undeclared, KB verification fails closed.
+        assert!(SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
+            .allowed_algs(SDJWTSignatureRole::KeyBindingJwt)
             .unwrap_err()
             .to_string()
             .contains("no allowed holder signing algorithms"));
@@ -689,12 +679,12 @@ mod tests {
         // library checks before invoking `verify`. The key's bound algorithm
         // further narrows what actually verifies, so extra entries never let
         // the token's `alg` select an algorithm.
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256", "ES384"], None)
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256", "ES384"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         assert_eq!(
             verifier
-                .allowed_verifying_algs(SDJWTSignatureRole::IssuerJwt)
+                .allowed_algs(SDJWTSignatureRole::IssuerJwt)
                 .unwrap(),
             vec!["ES256".to_string(), "ES384".to_string()]
         );
@@ -704,18 +694,18 @@ mod tests {
     fn builtin_holder_allowlist_is_independent_of_issuer_allowlist() {
         // A Verifier can restrict the Holder's KB-JWT allowlist without
         // touching the Issuer-JWT policy, and vice versa.
-        let provider = SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["EdDSA"]))
+        let provider = SDJWTSignatureVerifierBuiltin::new(&["ES256"], Some(&["EdDSA"]))
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         assert_eq!(
             provider
-                .allowed_verifying_algs(SDJWTSignatureRole::IssuerJwt)
+                .allowed_algs(SDJWTSignatureRole::IssuerJwt)
                 .unwrap(),
             vec!["ES256".to_string()]
         );
         assert_eq!(
             provider
-                .allowed_verifying_algs(SDJWTSignatureRole::KeyBindingJwt)
+                .allowed_algs(SDJWTSignatureRole::KeyBindingJwt)
                 .unwrap(),
             vec!["EdDSA".to_string()]
         );
@@ -725,7 +715,7 @@ mod tests {
     fn builtin_rejects_key_binding_without_cnf_key() {
         // A KB request with no in-band `cnf` key must not fall back to the pinned
         // Issuer key.
-        let verifier = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+        let verifier = SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .with_issuer_verifying_key(SDJWTKeyWithAlg::new(es256_verifying_key(), "ES256"))
             .unwrap();
         let mut req = request("ES256");
@@ -738,72 +728,12 @@ mod tests {
     }
 
     #[test]
-    fn builtin_without_signing_key_cannot_sign() {
-        let crypto_provider = SDJWTCryptoProviderBuiltin::new(&["ES256"], None);
-        assert!(crypto_provider
-            .sign(b"m", SDJWTSignatureRole::KeyBindingJwt)
-            .unwrap_err()
-            .to_string()
-            .contains("no holder signing key"));
-        assert!(crypto_provider
-            .signing_alg(SDJWTSignatureRole::IssuerJwt)
-            .unwrap_err()
-            .to_string()
-            .contains("no issuer signing key"));
-        assert!(crypto_provider
+    fn builtin_verifier_without_key_fails() {
+        assert!(SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
             .verify(b"m", b"s", &request("ES256"))
             .unwrap_err()
             .to_string()
             .contains("no issuer verifying key"));
-    }
-
-    #[test]
-    fn builtin_signing_keys_are_per_role() {
-        // A provider holding both keys signs each role with its own key and
-        // algorithm; a role whose key is absent errors instead of borrowing
-        // the other role's key.
-        let both = SDJWTCryptoProviderBuiltin::new(&["ES256"], Some(&["ES384"]))
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap()
-            .with_holder_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES384"))
-            .unwrap();
-        assert_eq!(
-            both.signing_alg(SDJWTSignatureRole::IssuerJwt).unwrap(),
-            "ES256"
-        );
-        assert_eq!(
-            both.signing_alg(SDJWTSignatureRole::KeyBindingJwt).unwrap(),
-            "ES384"
-        );
-
-        let issuer_only = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
-        assert!(issuer_only
-            .sign(b"m", SDJWTSignatureRole::KeyBindingJwt)
-            .unwrap_err()
-            .to_string()
-            .contains("no holder signing key"));
-    }
-
-    #[test]
-    fn default_trait_methods_fail_closed() {
-        // A provider implements only the pair its deployment needs
-        // (issuer-only: signing; verifier-only: verifying) — the other pair
-        // defaults to an error, never to acceptance.
-        struct EmptyProvider;
-        impl SDJWTCryptoProvider for EmptyProvider {}
-
-        let provider = EmptyProvider;
-        for role in [
-            SDJWTSignatureRole::IssuerJwt,
-            SDJWTSignatureRole::KeyBindingJwt,
-        ] {
-            assert!(provider.signing_alg(role).is_err());
-            assert!(provider.sign(b"m", role).is_err());
-            assert!(provider.allowed_verifying_algs(role).is_err());
-        }
-        assert!(provider.verify(b"m", b"s", &request("ES256")).is_err());
     }
 
     #[test]
@@ -825,17 +755,9 @@ mod tests {
 
     #[test]
     fn encode_jws_produces_three_parts() {
-        let signer = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
+        let signer = es256_signer();
         let header = crate::ProtectedHeader::new("ES256".to_string(), None).unwrap();
-        let jws = encode_jws(
-            &header,
-            &json!({"a": 1}),
-            &signer,
-            SDJWTSignatureRole::IssuerJwt,
-        )
-        .unwrap();
+        let jws = encode_jws(&header, &json!({"a": 1}), &signer).unwrap();
         assert_eq!(jws.split('.').count(), 3);
     }
 
@@ -843,19 +765,11 @@ mod tests {
     fn encode_jws_emits_only_set_header_fields() {
         // Absent optional fields must not appear as JSON nulls in the minted
         // header — only `alg` (and `typ` when set) go on the wire.
-        let signer = SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-            .with_issuer_signing_key(SDJWTKeyWithAlg::new(es256_signing_key(), "ES256"))
-            .unwrap();
+        let signer = es256_signer();
         let decoded_header = |typ: Option<&str>| -> Value {
             let header =
                 crate::ProtectedHeader::new("ES256".to_string(), typ.map(str::to_owned)).unwrap();
-            let jws = encode_jws(
-                &header,
-                &json!({"a": 1}),
-                &signer,
-                SDJWTSignatureRole::IssuerJwt,
-            )
-            .unwrap();
+            let jws = encode_jws(&header, &json!({"a": 1}), &signer).unwrap();
             let header_b64 = jws.split('.').next().unwrap();
             serde_json::from_slice(&base64url_decode(header_b64).unwrap()).unwrap()
         };
