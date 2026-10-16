@@ -13,8 +13,9 @@ use jsonwebtoken::{DecodingKey, EncodingKey};
 use rstest::{fixture, rstest};
 use sd_jwt_rs::issuer::ClaimsForSelectiveDisclosureStrategy;
 use sd_jwt_rs::{
-    SDJWTCryptoProvider, SDJWTCryptoProviderBuiltin, SDJWTFlattenedJson, SDJWTGeneralJson,
-    SDJWTHolder, SDJWTIssuer, SDJWTKeyWithAlg, SDJWTSerializationFormat, SDJWTVerifier,
+    SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTHolder, SDJWTIssuer, SDJWTKeyWithAlg,
+    SDJWTSerializationFormat, SDJWTSignatureVerifier, SDJWTSignatureVerifierBuiltin, SDJWTSigner,
+    SDJWTSignerBuiltin, SDJWTVerifier,
 };
 use sd_jwt_rs::{
     ALLOWED_SIGNING_ALGS, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_SIGNING_ALG,
@@ -31,30 +32,13 @@ fn issuer_public_key() -> SDJWTKeyWithAlg<DecodingKey> {
     )
 }
 
-fn issuer_crypto_provider(key: SDJWTKeyWithAlg<EncodingKey>) -> Box<dyn SDJWTCryptoProvider> {
-    Box::new(
-        SDJWTCryptoProviderBuiltin::new(ALLOWED_SIGNING_ALGS, None)
-            .with_issuer_signing_key(key)
-            .unwrap(),
-    )
+fn signer(key: SDJWTKeyWithAlg<EncodingKey>) -> Box<dyn SDJWTSigner> {
+    Box::new(SDJWTSignerBuiltin::new(key).unwrap())
 }
 
-fn holder_crypto_provider(
-    key: Option<SDJWTKeyWithAlg<EncodingKey>>,
-) -> Box<dyn SDJWTCryptoProvider> {
-    let mut provider =
-        SDJWTCryptoProviderBuiltin::new(ALLOWED_SIGNING_ALGS, Some(ALLOWED_SIGNING_ALGS))
-            .with_issuer_verifying_key(issuer_public_key())
-            .unwrap();
-    if let Some(key) = key {
-        provider = provider.with_holder_signing_key(key).unwrap();
-    }
-    Box::new(provider)
-}
-
-fn verifier_crypto_provider() -> Box<dyn SDJWTCryptoProvider> {
+fn signature_verifier() -> Box<dyn SDJWTSignatureVerifier> {
     Box::new(
-        SDJWTCryptoProviderBuiltin::new(ALLOWED_SIGNING_ALGS, Some(ALLOWED_SIGNING_ALGS))
+        SDJWTSignatureVerifierBuiltin::new(ALLOWED_SIGNING_ALGS, Some(ALLOWED_SIGNING_ALGS))
             .with_issuer_verifying_key(issuer_public_key())
             .unwrap(),
     )
@@ -360,7 +344,7 @@ fn demo_positive_cases(
     let (user_claims, strategy, holder_disclosed_claims, number_of_revealed_sds) = data;
     let (nonce, aud, holder_key, holder_jwk) = presentation_metadata;
     // Issuer issues SD-JWT
-    let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider(issuer_key))
+    let sd_jwt = SDJWTIssuer::new(signer(issuer_key))
         .issue_sd_jwt(
             user_claims.clone(),
             strategy,
@@ -371,7 +355,8 @@ fn demo_positive_cases(
         .unwrap();
     let issued = sd_jwt.clone();
     let mut holder = SDJWTHolder::new(
-        holder_crypto_provider(holder_key),
+        signature_verifier(),
+        holder_key.map(signer),
         sd_jwt.clone(),
         format.clone(),
     )
@@ -408,12 +393,14 @@ fn demo_positive_cases(
         SDJWTSerializationFormat::GeneralJson => {
             let mut issued: SDJWTGeneralJson = serde_json::from_str(&issued).unwrap();
             let mut revealed: SDJWTGeneralJson = serde_json::from_str(&presentation).unwrap();
+            let issued_disclosures = issued.signatures[0].header.disclosures.clone().unwrap();
             let disclosures: Vec<String> = revealed.signatures[0]
                 .header
                 .disclosures
                 .clone()
+                .unwrap()
                 .into_iter()
-                .filter(|d| issued.signatures[0].header.disclosures.contains(d))
+                .filter(|d| issued_disclosures.contains(d))
                 .collect();
             assert_eq!(number_of_revealed_sds, disclosures.len());
 
@@ -421,19 +408,21 @@ fn demo_positive_cases(
                 assert!(revealed.signatures[0].header.kb_jwt.is_some());
             }
 
-            issued.signatures[0].header.disclosures = disclosures;
+            issued.signatures[0].header.disclosures = Some(disclosures);
             revealed.signatures[0].header.kb_jwt = None;
             assert_eq!(revealed, issued);
         }
         SDJWTSerializationFormat::FlattenedJson => {
             let mut issued: SDJWTFlattenedJson = serde_json::from_str(&issued).unwrap();
             let mut revealed: SDJWTFlattenedJson = serde_json::from_str(&presentation).unwrap();
+            let issued_disclosures = issued.header.disclosures.clone().unwrap();
             let disclosures: Vec<String> = revealed
                 .header
                 .disclosures
                 .clone()
+                .unwrap()
                 .into_iter()
-                .filter(|d| issued.header.disclosures.contains(d))
+                .filter(|d| issued_disclosures.contains(d))
                 .collect();
             assert_eq!(number_of_revealed_sds, disclosures.len());
 
@@ -441,7 +430,7 @@ fn demo_positive_cases(
                 assert!(revealed.header.kb_jwt.is_some());
             }
 
-            issued.header.disclosures = disclosures;
+            issued.header.disclosures = Some(disclosures);
             revealed.header.kb_jwt = None;
             assert_eq!(revealed, issued);
         }
@@ -449,7 +438,7 @@ fn demo_positive_cases(
 
     // Verify presentation
     let _verified = SDJWTVerifier::new(
-        verifier_crypto_provider(),
+        signature_verifier(),
         presentation.clone(),
         aud,
         nonce,

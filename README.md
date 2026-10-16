@@ -11,74 +11,121 @@ Proposals about API improvements are highly appreciated.
 
 ```rust
 fn demo() {
-    let issuer_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
-        .with_issuer_signing_key(SDJWTKeyWithAlg::new(issuer_private_key, "ES256")).unwrap());
-    let mut issuer = SDJWTIssuer::new(issuer_crypto_provider);
+    let issuer_signer = Box::new(SDJWTSignerBuiltin::new(SDJWTKeyWithAlg::new(issuer_private_key, "ES256")).unwrap());
+    let mut issuer = SDJWTIssuer::new(issuer_signer);
     let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_jwk, add_decoy, SDJWTSerializationFormat::Compact).unwrap();
 
-    let holder_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+    let holder_verifier = Box::new(SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
         .with_issuer_verifying_key(SDJWTKeyWithAlg::new(issuer_public_key.clone(), "ES256")).unwrap());
-    let mut holder = SDJWTHolder::new(holder_crypto_provider, sd_jwt, SDJWTSerializationFormat::Compact).unwrap();
+    // `None`: no Key Binding signer, as this presentation has no Key Binding JWT.
+    let mut holder = SDJWTHolder::new(holder_verifier, None, sd_jwt, SDJWTSerializationFormat::Compact).unwrap();
     let presentation = holder.create_presentation(claims_to_disclosure, None, None).unwrap();
 
-    let verifier_crypto_provider = Box::new(SDJWTCryptoProviderBuiltin::new(&["ES256"], None)
+    let verifier = Box::new(SDJWTSignatureVerifierBuiltin::new(&["ES256"], None)
         .with_issuer_verifying_key(SDJWTKeyWithAlg::new(issuer_public_key, "ES256")).unwrap());
-    let verified_claims = SDJWTVerifier::new(verifier_crypto_provider, presentation, None, None, SDJWTSerializationFormat::Compact).unwrap()
+    let verified_claims = SDJWTVerifier::new(verifier, presentation, None, None, SDJWTSerializationFormat::Compact).unwrap()
                             .verified_claims;
 }
 ```
 
 See `tests/demos.rs` for more details;
 
-### Custom crypto providers
+### Custom signers and signature verifiers
 
-`SDJWTCryptoProviderBuiltin` covers the common case where raw key material is
-held in memory. To keep keys in a platform keystore, HSM, or remote KMS —
-where keys are non-extractable and only the signing/verification *operation*
-may cross the boundary — implement `SDJWTCryptoProvider` and inject that
-instead:
+`SDJWTSignerBuiltin` and `SDJWTSignatureVerifierBuiltin` cover the common case
+where raw key material is held in memory. To keep keys in a platform keystore,
+HSM, or remote KMS — where keys are non-extractable and only the
+signing/verification *operation* may cross the boundary — implement
+`SDJWTSigner` and/or `SDJWTSignatureVerifier` and inject those instead:
 
 ```rust
-struct KeystoreProvider { /* handle to the keystore */ }
+struct KeystoreSigner { /* handle to one keystore key */ }
 
-impl SDJWTCryptoProvider for KeystoreProvider {
-    fn signing_alg(&self, role: SDJWTSignatureRole) -> Result<String> {
-        // JWS `alg` name of the key the keystore holds for `role`.
+impl SDJWTSigner for KeystoreSigner {
+    fn header(&self) -> Result<SDJWTSignerHeader> {
+        // JWS `alg` of the keystore-held key and, optionally, parameters
+        // identifying it: `kid`, `x5c` or `jwk`.
+        Ok(SDJWTSignerHeader::new("ES256").with_kid("issuer-key-1"))
     }
-    fn allowed_verifying_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
+        // Sign the raw JWS signing input with the keystore-held key.
+    }
+}
+
+struct KeystoreVerifier { /* trusted keys */ }
+
+impl SDJWTSignatureVerifier for KeystoreVerifier {
+    fn allowed_algs(&self, role: SDJWTSignatureRole) -> Result<Vec<String>> {
         // Algorithm allowlist (RFC 8725 §3.1): the library rejects any JWT
         // whose header `alg` is not listed here BEFORE calling `verify`.
     }
-    fn sign(&self, message: &[u8], role: SDJWTSignatureRole) -> Result<Vec<u8>> {
-        // Sign the raw JWS signing input with the keystore-held key.
-    }
     fn verify(&self, message: &[u8], signature: &[u8], request: &SDJWTKeyRequest) -> Result<()> {
         // Select and trust a key for the signer `request` describes.
-        // `request.iss` / `request.kid` / `request.x5c` are UNVERIFIED input.
+        // `request.iss` / `kid` / `x5c` / `jwk` are UNVERIFIED input.
     }
 }
 ```
 
-Each method pair — signing (`signing_alg` + `sign`) and verifying
-(`allowed_verifying_algs` + `verify`) — has a fail-closed default returning
-an error, so implement only the pair(s) your party performs: signing for an
-Issuer, verifying for a Verifier, both for a Holder that presents with Key
-Binding.
+An Issuer takes a signer; a Verifier takes a signature verifier; a Holder takes
+a signature verifier for the Issuer signature and, to present with Key
+Binding, a signer for the Key Binding JWT.
 
 The library keeps ownership of all JWS encoding/decoding, header parsing
 (rejecting `alg` `none` and symmetric `HS*`), `exp`/`nbf` validation, and
-enforcing the provider's algorithm allowlist; the provider owns key
-selection and trust.
+enforcing the verifier's algorithm allowlist; the verifier owns key
+selection and trust. A signer supplies its protected header parameters:
+`alg` and, to identify its key, `kid`, `x5c` or `jwk`. `typ` is set by the
+library — the Issuer's (`SDJWTIssuer::with_typ`, e.g. `dc+sd-jwt`) or
+`kb+jwt` for a Key Binding JWT.
 
-The builtin binds each key to exactly one JWS algorithm (RFC 8725 §3.1).
-The policy is declared once:
-`SDJWTCryptoProviderBuiltin::new(issuer_algs, holder_algs)` takes the Issuer
-allowlist and, optionally, the Key Binding one (`None` when Key Binding is
-not used). The key setters take a `SDJWTKeyWithAlg` — a key paired with its
-algorithm. For key rotation, `with_issuer_verifying_key_for_kid(kid, key)`
-registers additional pinned keys selected by the token's header `kid`,
+The builtins bind each key to exactly one JWS algorithm (RFC 8725 §3.1) —
+`SDJWTKeyWithAlg` pairs a key with its algorithm. `SDJWTSignerBuiltin::new(key)`
+signs with one key; `.with_kid(kid)`, `.with_x5c(chain)` and `.with_jwk(jwk)`
+write those parameters to every JWS it signs.
+`SDJWTSignatureVerifierBuiltin::new(issuer_algs, holder_algs)` declares the
+Issuer allowlist and, optionally, the Key Binding one (`None` when Key Binding
+is not verified). For key rotation, `with_issuer_verifying_key_for_kid(kid,
+key)` registers additional pinned keys selected by the token's header `kid`,
 falling back to the `with_issuer_verifying_key` default key when one is
 bound.
+
+### Multiple Issuer signatures
+
+In the General JSON Serialization (RFC 9901 §8.3) an SD-JWT can be co-signed
+by several Issuers. Each signature is made like the first one — its signer's
+header (`alg`, `kid`, `x5c`, `jwk`) and the Issuer's `typ` in its own
+protected header. A `kid` is
+optional, but the Verifier's signature verifier must tell the signers apart;
+the builtin one selects keys by `kid`:
+
+```rust
+fn co_sign() {
+    let sd_jwt = issuer_1.issue_sd_jwt(claims, strategy, holder_jwk, false, SDJWTSerializationFormat::GeneralJson).unwrap();
+    // `issuer_2`'s signer is bound with `.with_kid("issuer-key-2")`.
+    let sd_jwt = issuer_2.add_signature(&sd_jwt).unwrap();
+
+    // A signature verifier with both keys pinned via `with_issuer_verifying_key_for_kid`.
+    let verifier = SDJWTVerifier::new(signature_verifier, presentation, aud, nonce, SDJWTSerializationFormat::GeneralJson).unwrap();
+}
+```
+
+`SDJWTVerifier::new` and `SDJWTHolder::new` require every signature present
+to verify. `new_with_policy(.., SDJWTSignaturePolicy::Any)` accepts the
+SD-JWT when at least one does, for a party that trusts only some of the
+Issuers; it stops at the first signature that verifies. A signature whose
+`alg` is outside the verifier's allowlist counts as a failed signature, so
+`Any` skips a co-signer using an unsupported algorithm. When several
+signatures fail under `Any`, their errors are combined into one
+`Error::InvalidInput`.
+
+Either way the policy covers the signatures *present*: the `signatures`
+array is not integrity protected, so a co-signature can be removed or
+duplicated in transit. To require specific signers, let your
+`SDJWTSignatureVerifier` — the component that selects and trusts keys, by
+`kid`, `x5c` or otherwise — record the keys it accepts, under
+`SDJWTSignaturePolicy::All`. Malformed input — e.g. a header parameter in
+both the protected and the unprotected header, `crit`, or `disclosures`
+outside the first signature — is rejected under every policy.
 
 ## Repository structure
 

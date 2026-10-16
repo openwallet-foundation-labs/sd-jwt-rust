@@ -6,7 +6,7 @@ use crate::{
     error, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTGeneralJsonSignature, SDJWTUnprotectedHeader,
 };
 use error::Result;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::vec::Vec;
 
 use jsonwebtoken::jwk::Jwk;
@@ -14,10 +14,10 @@ use rand::Rng;
 use serde_json::Value;
 use serde_json::{json, Map as SJMap, Map};
 
-use crate::crypto_provider::{self, SDJWTCryptoProvider, SDJWTSignatureRole};
+use crate::crypto_provider::{self, SDJWTSigner};
 use crate::disclosure::SDJWTDisclosure;
 use crate::error::Error;
-use crate::utils::{base64_hash, generate_salt};
+use crate::utils::{base64_hash, base64url_encode, generate_salt};
 use crate::{
     SDJWTCommon, SDJWTSerializationFormat, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
     DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
@@ -26,10 +26,10 @@ use crate::{
 pub struct SDJWTIssuer {
     // parameters
     add_decoy_claims: bool,
-    extra_header_parameters: Option<HashMap<String, String>>,
+    typ: Option<String>,
 
     // input data
-    crypto_provider: Box<dyn SDJWTCryptoProvider>,
+    signer: Box<dyn SDJWTSigner>,
     holder_key: Option<Jwk>,
 
     // internal fields
@@ -118,15 +118,15 @@ impl SDJWTIssuer {
     /// The instance can be used mutliple times to issue SD-JWTs.
     ///
     /// # Arguments
-    /// * `crypto_provider` - Crypto provider that signs the SD-JWT.
+    /// * `signer` - Signs the SD-JWT with the Issuer's key.
     ///
     /// # Returns
     /// A new SDJWTIssuer instance.
-    pub fn new(crypto_provider: Box<dyn SDJWTCryptoProvider>) -> Self {
+    pub fn new(signer: Box<dyn SDJWTSigner>) -> Self {
         SDJWTIssuer {
             add_decoy_claims: false,
-            extra_header_parameters: None,
-            crypto_provider,
+            typ: None,
+            signer,
             holder_key: None,
             inner: Default::default(),
             all_disclosures: vec![],
@@ -136,8 +136,15 @@ impl SDJWTIssuer {
         }
     }
 
+    /// Sets the `typ` header of the SD-JWTs this Issuer signs (RFC 9901
+    /// §9.11 explicit typing, e.g. `dc+sd-jwt`), on the first signature and
+    /// on every co-signature. No `typ` by default.
+    pub fn with_typ(mut self, typ: &str) -> Self {
+        self.typ = Some(typ.to_owned());
+        self
+    }
+
     fn reset(&mut self) {
-        self.extra_header_parameters = Default::default();
         self.all_disclosures = Default::default();
         self.sd_jwt_payload = Default::default();
         self.signed_sd_jwt = Default::default();
@@ -162,7 +169,6 @@ impl SDJWTIssuer {
         holder_key: Option<Jwk>,
         add_decoy_claims: bool,
         serialization_format: SDJWTSerializationFormat,
-        // extra_header_parameters: Option<HashMap<String, String>>,
     ) -> Result<String> {
         let inner = SDJWTCommon {
             serialization_format,
@@ -178,16 +184,54 @@ impl SDJWTIssuer {
         self.holder_key = holder_key;
         self.add_decoy_claims = add_decoy_claims;
 
-        let header = crate::ProtectedHeader::new(
-            self.crypto_provider
-                .signing_alg(SDJWTSignatureRole::IssuerJwt)?,
-            self.inner.typ.clone(),
-        )?;
+        let header = self.issuer_protected_header()?;
         self.assemble_sd_jwt_payload(user_claims, sd_strategy)?;
-        self.signed_sd_jwt = self.create_signed_jws(&header)?;
+        let payload = serde_json::to_string(&self.sd_jwt_payload)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        self.signed_sd_jwt =
+            self.create_signed_jws(header, &base64url_encode(payload.as_bytes()))?;
         self.create_combined()?;
 
         Ok(self.serialized_sd_jwt.clone())
+    }
+
+    /// Appends this Issuer's signature to an SD-JWT in General JSON
+    /// Serialization (RFC 9901 §8.3), producing an SD-JWT co-signed by
+    /// several Issuers.
+    ///
+    /// The existing signatures are **not** verified.
+    ///
+    /// # Arguments
+    /// * `general_json_sd_jwt` - An issued SD-JWT in General JSON Serialization.
+    ///
+    /// # Returns
+    /// The SD-JWT with the new signature appended.
+    pub fn add_signature(&self, general_json_sd_jwt: &str) -> Result<String> {
+        let mut parsed = SDJWTCommon {
+            serialization_format: SDJWTSerializationFormat::GeneralJson,
+            ..Default::default()
+        };
+        let header = self.issuer_protected_header()?;
+        parsed.parse_sd_jwt(general_json_sd_jwt.to_owned())?;
+        if parsed.unverified_input_key_binding_jwt.is_some() {
+            return Err(Error::InvalidInput(
+                "An SD-JWT+KB cannot be co-signed".to_string(),
+            ));
+        }
+        // Edit the raw JSON so members this library does not model are kept.
+        let mut general_json: Value = serde_json::from_str(general_json_sd_jwt)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        let payload = general_json["payload"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let jws = self.create_signed_jws(header, &payload)?;
+        let (protected, _, signature) = SDJWTCommon::split_jwt(&jws)?;
+        general_json["signatures"]
+            .as_array_mut()
+            .ok_or_else(|| Error::InvalidInput("Missing `signatures` array".to_string()))?
+            .push(json!({"protected": protected, "signature": signature}));
+        serde_json::to_string(&general_json).map_err(|e| Error::DeserializationError(e.to_string()))
     }
 
     fn assemble_sd_jwt_payload(
@@ -305,21 +349,16 @@ impl SDJWTIssuer {
         Value::Object(claims)
     }
 
-    fn create_signed_jws(&self, header: &crate::ProtectedHeader) -> Result<String> {
-        if let Some(extra_headers) = &self.extra_header_parameters {
-            let mut _protected_headers = extra_headers.clone();
-            for (key, value) in extra_headers.iter() {
-                _protected_headers.insert(key.to_string(), value.to_string());
-            }
-            unimplemented!("extra_headers are not supported for issuance");
-        }
+    /// The protected header of this Issuer's signatures — the first one and
+    /// every co-signature: the signer's header (`alg`, `kid`, `x5c`, `jwk`) and the SD-JWT `typ`.
+    /// Built before any other work, so an unusable signer fails first.
+    fn issuer_protected_header(&self) -> Result<crate::ProtectedHeader> {
+        crypto_provider::signer_protected_header(self.signer.as_ref(), self.typ.clone())
+    }
 
-        crypto_provider::encode_jws(
-            header,
-            &self.sd_jwt_payload,
-            self.crypto_provider.as_ref(),
-            SDJWTSignatureRole::IssuerJwt,
-        )
+    /// Signs the base64url-encoded `payload` under `header` as this Issuer.
+    fn create_signed_jws(&self, header: crate::ProtectedHeader, payload: &str) -> Result<String> {
+        crypto_provider::sign_encoded_payload(&header, payload, self.signer.as_ref())
     }
 
     fn create_combined(&mut self) -> Result<()> {
@@ -342,39 +381,23 @@ impl SDJWTIssuer {
             }
             SDJWTSerializationFormat::FlattenedJson => {
                 let (protected, payload, signature) = SDJWTCommon::split_jwt(&self.signed_sd_jwt)?;
-                let header = SDJWTUnprotectedHeader {
-                    kb_jwt: None,
-                    disclosures: self
-                        .all_disclosures
-                        .iter()
-                        .map(|d| d.raw_b64.to_string())
-                        .collect(),
-                };
                 let flattened_json = SDJWTFlattenedJson {
                     protected,
                     payload,
                     signature,
-                    header,
+                    header: self.issuance_unprotected_header(),
                 };
                 self.serialized_sd_jwt = serde_json::to_string(&flattened_json)
                     .map_err(|e| Error::DeserializationError(e.to_string()))?;
             }
             SDJWTSerializationFormat::GeneralJson => {
                 let (protected, payload, signature) = SDJWTCommon::split_jwt(&self.signed_sd_jwt)?;
-                let header = SDJWTUnprotectedHeader {
-                    kb_jwt: None,
-                    disclosures: self
-                        .all_disclosures
-                        .iter()
-                        .map(|d| d.raw_b64.to_string())
-                        .collect(),
-                };
                 let general_json = SDJWTGeneralJson {
                     payload,
                     signatures: vec![SDJWTGeneralJsonSignature {
                         protected,
                         signature,
-                        header,
+                        header: self.issuance_unprotected_header(),
                     }],
                 };
                 self.serialized_sd_jwt = serde_json::to_string(&general_json)
@@ -383,6 +406,19 @@ impl SDJWTIssuer {
         }
 
         Ok(())
+    }
+
+    fn issuance_unprotected_header(&self) -> SDJWTUnprotectedHeader {
+        SDJWTUnprotectedHeader {
+            disclosures: Some(
+                self.all_disclosures
+                    .iter()
+                    .map(|d| d.raw_b64.to_string())
+                    .collect(),
+            ),
+            kb_jwt: None,
+            kid: None,
+        }
     }
 
     fn create_decoy_claim_entry(&mut self) -> String {
@@ -402,42 +438,27 @@ mod tests {
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
 
-    fn issuer_crypto_provider(
-        issuer_key: Option<crate::SDJWTKeyWithAlg<EncodingKey>>,
-    ) -> Box<dyn crate::SDJWTCryptoProvider> {
-        let mut provider =
-            crate::SDJWTCryptoProviderBuiltin::new(crate::ALLOWED_SIGNING_ALGS, None);
-        if let Some(key) = issuer_key {
-            provider = provider.with_issuer_signing_key(key).unwrap();
-        }
-        Box::new(provider)
-    }
-
-    /// Crypto provider whose `signing_alg` succeeds but whose `sign` fails, for
-    /// exercising error propagation from the signing call itself (e.g. an
-    /// HSM that goes unavailable between the two calls).
-    fn sign_failing_crypto_provider() -> Box<dyn crate::SDJWTCryptoProvider> {
-        struct SignFailingProvider;
-        impl crate::SDJWTCryptoProvider for SignFailingProvider {
-            fn signing_alg(&self, _: crate::SDJWTSignatureRole) -> crate::error::Result<String> {
-                Ok(crate::DEFAULT_SIGNING_ALG.to_string())
+    /// Signer whose `header` succeeds but whose `sign` fails, for exercising
+    /// error propagation from the signing call itself (e.g. an HSM that goes
+    /// unavailable between the two calls).
+    fn sign_failing_signer() -> Box<dyn crate::SDJWTSigner> {
+        struct SignFailingSigner;
+        impl crate::SDJWTSigner for SignFailingSigner {
+            fn header(&self) -> crate::error::Result<crate::SDJWTSignerHeader> {
+                Ok(crate::SDJWTSignerHeader::new(crate::DEFAULT_SIGNING_ALG))
             }
-            fn sign(
-                &self,
-                _: &[u8],
-                _: crate::SDJWTSignatureRole,
-            ) -> crate::error::Result<Vec<u8>> {
+            fn sign(&self, _: &[u8]) -> crate::error::Result<Vec<u8>> {
                 Err(crate::error::Error::KeyNotFound(
                     "keystore unavailable".to_string(),
                 ))
             }
         }
-        Box::new(SignFailingProvider)
+        Box::new(SignFailingSigner)
     }
 
     #[test]
-    fn issue_propagates_provider_sign_error() {
-        let result = SDJWTIssuer::new(sign_failing_crypto_provider()).issue_sd_jwt(
+    fn issue_propagates_signer_error() {
+        let result = SDJWTIssuer::new(sign_failing_signer()).issue_sd_jwt(
             json!({"iss": "https://example.com/issuer", "sub": "6c5c0a49"}),
             ClaimsForSelectiveDisclosureStrategy::AllLevels,
             None,
@@ -445,27 +466,12 @@ mod tests {
             SDJWTSerializationFormat::Compact,
         );
         match result {
-            Ok(_) => panic!("issuance succeeded although the provider cannot sign"),
+            Ok(_) => panic!("issuance succeeded although the signer cannot sign"),
             Err(err) => assert!(
                 err.to_string().contains("keystore unavailable"),
                 "got: {err}"
             ),
         }
-    }
-
-    #[test]
-    fn issue_fails_without_signing_key() {
-        let result = SDJWTIssuer::new(issuer_crypto_provider(None)).issue_sd_jwt(
-            json!({"iss": "https://example.com/issuer", "sub": "6c5c0a49"}),
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        );
-        assert!(
-            result.is_err(),
-            "issuance must fail when the provider has no signing key"
-        );
     }
 
     #[test]
@@ -484,18 +490,20 @@ mod tests {
         });
         let private_issuer_bytes = PRIVATE_ISSUER_PEM.as_bytes();
         let issuer_key = EncodingKey::from_ec_pem(private_issuer_bytes).unwrap();
-        let sd_jwt = SDJWTIssuer::new(issuer_crypto_provider(Some(crate::SDJWTKeyWithAlg::new(
+        let signer = crate::SDJWTSignerBuiltin::new(crate::SDJWTKeyWithAlg::new(
             issuer_key,
             crate::DEFAULT_SIGNING_ALG,
-        ))))
-        .issue_sd_jwt(
-            user_claims,
-            ClaimsForSelectiveDisclosureStrategy::AllLevels,
-            None,
-            false,
-            SDJWTSerializationFormat::Compact,
-        )
+        ))
         .unwrap();
+        let sd_jwt = SDJWTIssuer::new(Box::new(signer))
+            .issue_sd_jwt(
+                user_claims,
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
         trace!("{:?}", sd_jwt)
     }
 

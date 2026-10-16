@@ -31,6 +31,7 @@ const SETTINGS_FILE_NAME = 'settings.yml';
 const SPECIFICATION_FILE_NAME = 'specification.yml';
 const SALTS_FILE_NAME = 'claims_vs_salts.json';
 const SD_JWT_FILE_NAME_TEMPLATE = 'sd_jwt_issuance';
+const SD_JWT_PRESENTATION_FILE_NAME_TEMPLATE = 'sd_jwt_presentation';
 const VERIFIED_CLAIMS_FILE_NAME = 'verified_contents.json';
 
 // ---- YAML: parse to AST so `!sd`-tagged nodes (on map keys or sequence elements) can be told apart from untagged ones.
@@ -443,6 +444,7 @@ async function generateOne(dir) {
     let issuedCompact;
     let verifiedPayload;
     let storedContent;
+    let presentationContent;
 
     if (useGeneral) {
         const instance = new SDJwtGeneralJSONInstance({
@@ -468,6 +470,7 @@ async function generateOne(dir) {
         storedContent = JSON.stringify(issuedJson.toJson());
 
         const presented = await instance.present(issuedJson, presentationFrame, kbOptions);
+        presentationContent = JSON.stringify(presented.toJson());
         const verified = await instance.verify(presented, {
             ...verifyOptions,
             allowedIssuerAlgorithms: [SIGNING_ALG],
@@ -499,12 +502,17 @@ async function generateOne(dir) {
             : issuedCompact;
 
         const presented = await instance.present(issuedCompact, presentationFrame, kbOptions);
+        if (useJson) presentationContent = JSON.stringify(instance.toFlattenJSON(presented).toJson());
         const verified = await instance.verify(presented, verifyOptions);
         verifiedPayload = verified.payload;
     }
 
     const sdJwtFileName = useJson ? `${SD_JWT_FILE_NAME_TEMPLATE}.json` : `${SD_JWT_FILE_NAME_TEMPLATE}.txt`;
     fs.writeFileSync(path.join(dir, sdJwtFileName), storedContent);
+    // Only the JWS JSON presentations are read back by the interop tool.
+    if (useJson) {
+        fs.writeFileSync(path.join(dir, `${SD_JWT_PRESENTATION_FILE_NAME_TEMPLATE}.json`), presentationContent);
+    }
     fs.writeFileSync(path.join(dir, SALTS_FILE_NAME), JSON.stringify(salts, null, 2));
     fs.writeFileSync(path.join(dir, VERIFIED_CLAIMS_FILE_NAME), JSON.stringify(verifiedPayload, null, 2));
 

@@ -21,6 +21,8 @@ pub struct Key {
     pub crv: String,
     pub x: String,
     pub y: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]

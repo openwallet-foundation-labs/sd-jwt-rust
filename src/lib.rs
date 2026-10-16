@@ -4,8 +4,8 @@
 
 use crate::error::Error;
 use crate::utils::{
-    base64_hash, base64_standard_decode, base64url_decode, jwt_payload_decode, now_seconds,
-    numeric_date,
+    base64_hash, base64_standard_decode, base64_standard_encode, base64url_decode,
+    jwt_payload_decode, now_seconds, numeric_date,
 };
 
 use error::Result;
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use strum::Display;
 pub use {
     crypto_provider::{
-        SDJWTCryptoProvider, SDJWTCryptoProviderBuiltin, SDJWTKeyRequest, SDJWTKeyWithAlg,
-        SDJWTSignatureRole,
+        SDJWTKeyRequest, SDJWTKeyWithAlg, SDJWTSignatureRole, SDJWTSignatureVerifier,
+        SDJWTSignatureVerifierBuiltin, SDJWTSigner, SDJWTSignerBuiltin, SDJWTSignerHeader,
     },
     holder::SDJWTHolder,
     issuer::ClaimsForSelectiveDisclosureStrategy,
@@ -46,6 +46,7 @@ pub const COMBINED_SERIALIZATION_FORMAT_SEPARATOR: &str = "~";
 const JWT_SEPARATOR: &str = ".";
 const CNF_KEY: &str = "cnf";
 const JWK_KEY: &str = "jwk";
+const CRIT_KEY: &str = "crit";
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -68,7 +69,7 @@ pub enum SDJWTSerializationFormat {
 /// The JWS protected header, minted (`encode_jws`) and parsed
 /// (`parse_protected_header`) by the library — one type for both directions,
 /// used instead of `jsonwebtoken::Header` so `alg` can carry any JWS wire
-/// name a crypto provider supports, not just `jsonwebtoken`'s closed enum.
+/// name a signer or verifier supports, not just `jsonwebtoken`'s closed enum.
 /// [Self::new] is the single chokepoint where `alg` values SD-JWT must never
 /// use (`none`, symmetric `HS*`) are rejected: fields are private and both
 /// paths construct through it, so neither a minted nor an accepted header can
@@ -83,6 +84,8 @@ pub(crate) struct ProtectedHeader {
     kid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     x5c: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jwk: Option<Map<String, Value>>,
 }
 
 impl ProtectedHeader {
@@ -93,7 +96,30 @@ impl ProtectedHeader {
             typ,
             kid: None,
             x5c: None,
+            jwk: None,
         })
+    }
+
+    /// The header an [SDJWTSigner] signs under, with the library's `typ`.
+    pub(crate) fn from_signer(signer: SDJWTSignerHeader, typ: Option<String>) -> Result<Self> {
+        let mut header = Self::new(signer.alg, typ)?;
+        header.kid = signer.kid;
+        header.x5c = signer.x5c.map(|certs| {
+            certs
+                .iter()
+                .map(|cert| base64_standard_encode(cert))
+                .collect()
+        });
+        header.jwk = signer
+            .jwk
+            .map(|jwk| match serde_json::to_value(jwk) {
+                Ok(Value::Object(jwk)) => Ok(jwk),
+                _ => Err(Error::DeserializationError(
+                    "Cannot serialize `jwk`".to_string(),
+                )),
+            })
+            .transpose()?;
+        Ok(header)
     }
 
     pub(crate) fn alg(&self) -> &str {
@@ -106,6 +132,13 @@ impl ProtectedHeader {
 
     pub(crate) fn kid(&self) -> Option<&str> {
         self.kid.as_deref()
+    }
+
+    /// The `jwk` as a JSON string, as [SDJWTKeyRequest] carries it.
+    pub(crate) fn jwk_json(&self) -> Option<String> {
+        self.jwk
+            .as_ref()
+            .map(|jwk| Value::Object(jwk.clone()).to_string())
     }
 
     /// The `x5c` chain base64-decoded to DER, as [SDJWTKeyRequest] carries it.
@@ -129,12 +162,30 @@ impl ProtectedHeader {
     }
 }
 
+/// Which of the Issuer signatures *present* in a JWS JSON serialized SD-JWT
+/// must verify for it to be accepted (RFC 7515 §5.2 leaves this to the
+/// application).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SDJWTSignaturePolicy {
+    /// Every signature present must verify.
+    #[default]
+    All,
+    /// At least one signature must verify.
+    Any,
+}
+
 #[derive(Default)]
 pub(crate) struct SDJWTCommon {
-    typ: Option<String>,
     serialization_format: SDJWTSerializationFormat,
     unverified_input_key_binding_jwt: Option<String>,
+    /// Compact form of the first Issuer signature — the one `sd_hash` binds to
+    /// (RFC 9901 §8.1).
     unverified_sd_jwt: Option<String>,
+    /// Every Issuer signature in input order; the first one's `disclosures`
+    /// and `kb_jwt` are moved out into `input_disclosures` and
+    /// `unverified_input_key_binding_jwt`.
+    signatures: Vec<SDJWTGeneralJsonSignature>,
     unverified_input_sd_jwt_payload: Option<Map<String, Value>>,
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
@@ -146,6 +197,7 @@ pub struct SDJWTFlattenedJson {
     protected: String,
     payload: String,
     signature: String,
+    #[serde(default, skip_serializing_if = "SDJWTUnprotectedHeader::is_empty")]
     pub header: SDJWTUnprotectedHeader,
 }
 
@@ -159,14 +211,30 @@ pub struct SDJWTGeneralJson {
 pub struct SDJWTGeneralJsonSignature {
     protected: String,
     signature: String,
+    /// Absent on the wire when empty (RFC 7515 §7.2.1).
+    #[serde(default, skip_serializing_if = "SDJWTUnprotectedHeader::is_empty")]
     pub header: SDJWTUnprotectedHeader,
 }
 
+/// JWS unprotected header of an SD-JWT in JWS JSON Serialization
+/// (RFC 9901 §8.1). `disclosures` and `kb_jwt` are only allowed in the first
+/// signature's header (§8.3). `kid` is read for key selection when a peer
+/// puts it here; this library writes `kid` to the protected header instead.
+#[non_exhaustive]
 #[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
 pub struct SDJWTUnprotectedHeader {
-    pub disclosures: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosures: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kb_jwt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
+}
+
+impl SDJWTUnprotectedHeader {
+    fn is_empty(&self) -> bool {
+        self.disclosures.is_none() && self.kb_jwt.is_none() && self.kid.is_none()
+    }
 }
 
 // Define the SDJWTCommon struct to hold common properties.
@@ -186,6 +254,13 @@ impl SDJWTCommon {
                 Error::InvalidInput("JWT header is missing the `alg` parameter".to_string())
             })?
             .to_owned();
+        // RFC 7515 §5.2 step 5: every `crit` extension must be understood, and
+        // this library implements none.
+        if header.get(CRIT_KEY).is_some() {
+            return Err(Error::InvalidInput(
+                "JWT header `crit` extensions are not supported".to_string(),
+            ));
+        }
         let typ = header.get("typ").and_then(Value::as_str).map(str::to_owned);
         // `ProtectedHeader::new` rejects an unacceptable `alg` — the same
         // chokepoint the minting side passes through.
@@ -206,15 +281,27 @@ impl SDJWTCommon {
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?;
+        protected.jwk = match header.get("jwk") {
+            None => None,
+            Some(Value::Object(jwk)) => Some(jwk.clone()),
+            Some(_) => {
+                return Err(Error::InvalidInput(
+                    "`jwk` must be a JSON object".to_string(),
+                ))
+            }
+        };
         Ok(protected)
     }
 
-    fn build_key_request(&self) -> Result<SDJWTKeyRequest> {
-        let sd_jwt = self
-            .unverified_sd_jwt
-            .as_ref()
-            .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
-        let header = Self::parse_protected_header(sd_jwt)?;
+    /// The key request for one Issuer signature (`jwt` in compact form).
+    /// `unprotected_kid` is that signature's unprotected-header `kid`, used
+    /// when the protected header has none (both at once is rejected at parse).
+    fn build_key_request(
+        &self,
+        jwt: &str,
+        unprotected_kid: Option<&str>,
+    ) -> Result<SDJWTKeyRequest> {
+        let header = Self::parse_protected_header(jwt)?;
         let iss = self
             .unverified_input_sd_jwt_payload
             .as_ref()
@@ -225,25 +312,25 @@ impl SDJWTCommon {
         Ok(SDJWTKeyRequest {
             role: SDJWTSignatureRole::IssuerJwt,
             iss,
-            kid: header.kid().map(str::to_owned),
+            kid: header.kid().or(unprotected_kid).map(str::to_owned),
             alg: header.alg().to_owned(),
             x5c: header.x5c_der()?,
-            jwk: None,
+            jwk: header.jwk_json(),
         })
     }
 
-    /// Verify a compact JWS with `crypto_provider` and return its decoded
+    /// Verify a compact JWS with `signature_verifier` and return its decoded
     /// payload claims. Shared by Issuer-JWT and Key Binding JWT verification so
     /// the signing-input reconstruction stays identical for both. Enforces the
-    /// provider's algorithm allowlist (RFC 8725 §3.1) before invoking
+    /// verifier's algorithm allowlist (RFC 8725 §3.1) before invoking
     /// `verify`, so the (attacker-controlled) header `alg` can never select
-    /// the verification algorithm regardless of the provider implementation.
+    /// the verification algorithm regardless of the verifier implementation.
     fn verify_compact_jws(
         jwt: &str,
         request: &SDJWTKeyRequest,
-        crypto_provider: &dyn SDJWTCryptoProvider,
+        signature_verifier: &dyn SDJWTSignatureVerifier,
     ) -> Result<Map<String, Value>> {
-        let allowed = crypto_provider.allowed_verifying_algs(request.role)?;
+        let allowed = signature_verifier.allowed_algs(request.role)?;
         if !allowed.iter().any(|alg| alg == &request.alg) {
             return Err(Error::InvalidInput(format!(
                 "JWT `alg` \"{}\" is not an allowed verification algorithm for the {}",
@@ -257,36 +344,82 @@ impl SDJWTCommon {
         let (protected, payload, signature) = Self::split_jwt(jwt)?;
         let message = format!("{protected}.{payload}");
         let signature = base64url_decode(&signature)?;
-        crypto_provider.verify(message.as_bytes(), &signature, request)?;
+        signature_verifier.verify(message.as_bytes(), &signature, request)?;
         jwt_payload_decode(&payload)
     }
 
-    /// Process an Issuer-signed JWT and return its payload claims. The keyless
-    /// checks — `alg` rejection (via `build_key_request`) and temporal
-    /// validation — always run; only the cryptographic signature check is
-    /// gated on a crypto provider, so a Holder may opt out of signature
-    /// verification with `None` while the library still rejects a
-    /// malformed-`alg` or expired Issuer JWT.
+    /// Process the Issuer-signed JWT and return its payload claims.
+    ///
+    /// Every signature's protected header is first checked — `alg` rejection
+    /// (via `build_key_request`) and decoding — before any signature-verifier
+    /// call; such failures reject the input under every
+    /// `signature_policy`. Only the cryptographic checks are subject to the
+    /// policy. They are gated on a signature verifier, so a Holder may opt out of
+    /// signature verification with `None` while the library still rejects a
+    /// malformed or expired Issuer JWT.
     fn process_issuer_jwt(
         &self,
-        crypto_provider: Option<&dyn SDJWTCryptoProvider>,
+        signature_verifier: Option<&dyn SDJWTSignatureVerifier>,
+        signature_policy: SDJWTSignaturePolicy,
     ) -> Result<Map<String, Value>> {
         let sd_jwt = self
             .unverified_sd_jwt
             .as_ref()
             .ok_or(Error::InvalidState("Cannot reference jwt".to_string()))?;
-        let request = self.build_key_request()?;
-        let claims = match crypto_provider {
-            Some(crypto_provider) => Self::verify_compact_jws(sd_jwt, &request, crypto_provider)?,
-            None => {
-                let (_, payload, _) = Self::split_jwt(sd_jwt)?;
-                jwt_payload_decode(&payload)?
-            }
-        };
+        let (_, payload, _) = Self::split_jwt(sd_jwt)?;
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|signature| {
+                let jwt = format!("{}.{payload}.{}", signature.protected, signature.signature);
+                let request = self.build_key_request(&jwt, signature.header.kid.as_deref())?;
+                Ok((jwt, request))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(signature_verifier) = signature_verifier {
+            Self::verify_issuer_signatures(&signatures, signature_verifier, signature_policy)?;
+        }
+        let claims = jwt_payload_decode(&payload)?;
         // A present `aud` in the Issuer-signed JWT is deliberately not checked
         // here: `expected_aud` applies to the Key Binding JWT.
         Self::check_validity_period(&claims)?;
         Ok(claims)
+    }
+
+    /// Verify the Issuer signatures under `signature_policy`.
+    /// [SDJWTSignaturePolicy::All] - the first failure is returned unchanged;
+    /// [SDJWTSignaturePolicy::Any] the first success accepts — later
+    /// signatures are not offered to `signature_verifier` — and if none
+    /// verifies, a single signature's error is returned unchanged while
+    /// several are combined into one [Error::InvalidInput].
+    fn verify_issuer_signatures(
+        signatures: &[(String, SDJWTKeyRequest)],
+        signature_verifier: &dyn SDJWTSignatureVerifier,
+        signature_policy: SDJWTSignaturePolicy,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        for (index, (jwt, request)) in signatures.iter().enumerate() {
+            match Self::verify_compact_jws(jwt, request, signature_verifier) {
+                Ok(_) if signature_policy == SDJWTSignaturePolicy::Any => return Ok(()),
+                Ok(_) => {}
+                Err(err) if signature_policy == SDJWTSignaturePolicy::All => return Err(err),
+                Err(err) => failures.push((index, &request.kid, err)),
+            }
+        }
+        if failures.is_empty() {
+            return Ok(());
+        }
+        if failures.len() == 1 {
+            return Err(failures.remove(0).2);
+        }
+        let reasons: Vec<String> = failures
+            .iter()
+            .map(|(index, kid, err)| format!("signature {index} (kid {kid:?}): {err}"))
+            .collect();
+        Err(Error::InvalidInput(format!(
+            "No Issuer signature verified: {}",
+            reasons.join("; ")
+        )))
     }
 
     fn check_validity_period(payload: &Map<String, Value>) -> Result<()> {
@@ -405,48 +538,129 @@ impl SDJWTCommon {
             ),
         })?;
         self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(jwt_body)?);
+        let (protected, _, signature) =
+            Self::split_jwt(self.unverified_sd_jwt.as_deref().unwrap_or(""))?;
+        self.signatures = vec![SDJWTGeneralJsonSignature {
+            protected,
+            signature,
+            header: SDJWTUnprotectedHeader::default(),
+        }];
         Ok(())
     }
 
     fn parse_flattened_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
-        let parsed: SDJWTFlattenedJson = serde_json::from_str(&sd_jwt_with_disclosures)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        self.unverified_input_key_binding_jwt = parsed.header.kb_jwt;
-        self.input_disclosures = parsed.header.disclosures;
-        self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(&parsed.payload)?);
-        let sd_jwt = format!(
-            "{}.{}.{}",
-            parsed.protected, parsed.payload, parsed.signature
-        );
-        self.unverified_sd_jwt = Some(sd_jwt.clone());
-        Ok(())
+        // RFC 7515 §7.2.2: Flattened is processed identically to General, so
+        // the object itself is the single `signatures[]` entry.
+        let mut parsed = Self::parse_json_object(&sd_jwt_with_disclosures)?;
+        let payload = Self::take_json_payload(&mut parsed)?;
+        self.parse_json_signatures(payload, vec![Value::Object(parsed)])
     }
 
     fn parse_general_json_sd_jwt(&mut self, sd_jwt_with_disclosures: String) -> Result<()> {
-        let parsed: SDJWTGeneralJson = serde_json::from_str(&sd_jwt_with_disclosures)
-            .map_err(|e| Error::DeserializationError(e.to_string()))?;
-        if parsed.signatures.len() > 1 {
+        let mut parsed = Self::parse_json_object(&sd_jwt_with_disclosures)?;
+        let payload = Self::take_json_payload(&mut parsed)?;
+        let Some(Value::Array(signatures)) = parsed.remove("signatures") else {
+            return Err(Error::DeserializationError(
+                "General JSON SD-JWT must contain a `signatures` array".to_string(),
+            ));
+        };
+        self.parse_json_signatures(payload, signatures)
+    }
+
+    fn parse_json_object(sd_jwt_with_disclosures: &str) -> Result<Map<String, Value>> {
+        serde_json::from_str(sd_jwt_with_disclosures)
+            .map_err(|e| Error::DeserializationError(e.to_string()))
+    }
+
+    fn take_json_payload(parsed: &mut Map<String, Value>) -> Result<String> {
+        match parsed.remove("payload") {
+            Some(Value::String(payload)) => Ok(payload),
+            _ => Err(Error::DeserializationError(
+                "JWS JSON SD-JWT must contain a string `payload`".to_string(),
+            )),
+        }
+    }
+
+    /// Shared tail of the JWS JSON parsers: `signatures` holds the raw
+    /// `signatures[]` entries (one for Flattened). The header checks run on the
+    /// raw JSON because the typed structs drop unknown members and read a
+    /// `null` member as absent.
+    fn parse_json_signatures(&mut self, payload: String, signatures: Vec<Value>) -> Result<()> {
+        if signatures.is_empty() {
             return Err(Error::InvalidInput(
-                "General JSON SD-JWT with multiple signatures is not supported yet".to_string(),
+                "General JSON SD-JWT must contain at least one signature".to_string(),
             ));
         }
-        // RFC 9901 §8.3: in General JSON Serialization, the Disclosures and the
-        // optional KB-JWT live in the first signature's unprotected header.
-        let signature = parsed
-            .signatures
+        let mut signatures = signatures
             .into_iter()
-            .next()
-            .ok_or(Error::InvalidInput(
-                "General JSON SD-JWT must contain at least one signature".to_string(),
-            ))?;
-        self.unverified_input_key_binding_jwt = signature.header.kb_jwt;
-        self.input_disclosures = signature.header.disclosures;
-        self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(&parsed.payload)?);
-        let sd_jwt = format!(
-            "{}.{}.{}",
-            signature.protected, parsed.payload, signature.signature
-        );
-        self.unverified_sd_jwt = Some(sd_jwt.clone());
+            .enumerate()
+            .map(|(index, signature)| {
+                Self::check_signature_headers(index, &signature)?;
+                serde_json::from_value::<SDJWTGeneralJsonSignature>(signature)
+                    .map_err(|e| Error::DeserializationError(e.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // RFC 9901 §8.3: the Disclosures and the optional KB-JWT live in the
+        // first signature's unprotected header.
+        let first = &mut signatures[0];
+        self.input_disclosures = first.header.disclosures.take().unwrap_or_default();
+        self.unverified_input_key_binding_jwt = first.header.kb_jwt.take();
+        self.unverified_sd_jwt = Some(format!("{}.{payload}.{}", first.protected, first.signature));
+        self.unverified_input_sd_jwt_payload = Some(jwt_payload_decode(&payload)?);
+        self.signatures = signatures;
+        Ok(())
+    }
+
+    /// Header checks on one raw `signatures[]` entry (`index` 0 is the first):
+    /// protected and unprotected Header Parameter names are disjoint
+    /// (RFC 7515 §7.2.1, §5.2 step 4), `crit` is not used, and only the first
+    /// unprotected header may carry `disclosures` / `kb_jwt` (RFC 9901 §8.3).
+    fn check_signature_headers(index: usize, signature: &Value) -> Result<()> {
+        let empty = Map::new();
+        let unprotected = match signature.get("header") {
+            None => &empty,
+            Some(Value::Object(header)) => header,
+            Some(_) => {
+                return Err(Error::DeserializationError(format!(
+                    "Unprotected `header` of signature {index} must be a JSON object"
+                )))
+            }
+        };
+        let protected = signature
+            .get("protected")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::DeserializationError(format!(
+                    "Signature {index} must contain a string `protected` header"
+                ))
+            })?;
+        let protected: Value = serde_json::from_slice(&base64url_decode(protected)?)
+            .map_err(|e| Error::DeserializationError(e.to_string()))?;
+        // A non-object protected header is rejected by `parse_protected_header`.
+        let protected = protected.as_object().cloned().unwrap_or_default();
+        if let Some(name) = unprotected
+            .keys()
+            .find(|name| protected.contains_key(*name))
+        {
+            return Err(Error::InvalidInput(format!(
+                "Header Parameter {name:?} of signature {index} is present in both the protected and the unprotected header"
+            )));
+        }
+        if unprotected.contains_key(CRIT_KEY) {
+            return Err(Error::InvalidInput(format!(
+                "Unprotected header of signature {index} must not contain `crit`"
+            )));
+        }
+        if index > 0 {
+            if let Some(name) = ["disclosures", "kb_jwt"]
+                .into_iter()
+                .find(|name| unprotected.contains_key(*name))
+            {
+                return Err(Error::InvalidInput(format!(
+                    "`{name}` must only be present in the first signature's unprotected header, found in signature {index}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -519,12 +733,13 @@ mod tests {
     fn test_parse_flattened_json_sd_jwt() {
         let mut sdjwt = SDJWTCommon::default();
         let encoded_empty_object = utils::base64url_encode("{}".as_bytes());
+        let protected = utils::base64url_encode(br#"{"alg":"ES256"}"#);
         sdjwt.parse_flattened_json_sd_jwt(format!(
-            r#"{{"protected":"jwt1","payload":"{encoded_empty_object}","signature":"jwt3","header":{{"disclosures":["disc1","disc2"],"kb_jwt":"kbjwt"}}}}"#
+            r#"{{"protected":"{protected}","payload":"{encoded_empty_object}","signature":"jwt3","header":{{"disclosures":["disc1","disc2"],"kb_jwt":"kbjwt"}}}}"#
         )).unwrap();
         assert_eq!(
             sdjwt.unverified_sd_jwt.unwrap(),
-            format!("jwt1.{encoded_empty_object}.jwt3")
+            format!("{protected}.{encoded_empty_object}.jwt3")
         );
         assert_eq!(sdjwt.unverified_input_key_binding_jwt.unwrap(), "kbjwt");
         assert_eq!(

@@ -17,6 +17,7 @@ use serde_json::Value;
 #[derive(Deserialize)]
 struct FlattenedJsonSdJwt {
     payload: String,
+    #[serde(default)]
     header: UnprotectedHeader,
 }
 
@@ -28,10 +29,12 @@ struct GeneralJsonSdJwt {
 
 #[derive(Deserialize)]
 struct GeneralJsonSignature {
+    // Absent when empty (RFC 7515 §7.2.1).
+    #[serde(default)]
     header: UnprotectedHeader,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct UnprotectedHeader {
     #[serde(default)]
     disclosures: Vec<String>,
