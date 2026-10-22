@@ -2,11 +2,12 @@
 // https://www.dsr-corporation.com
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::digest::SDJWTDigestAlgorithm;
+use crate::utils::base64url_encode;
 #[cfg(not(feature = "mock_salts"))]
 use crate::utils::generate_salt;
 #[cfg(feature = "mock_salts")]
 use crate::utils::generate_salt_mock;
-use crate::utils::{base64_hash, base64url_encode};
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -16,7 +17,11 @@ pub(crate) struct SDJWTDisclosure {
 }
 
 impl SDJWTDisclosure {
-    pub(crate) fn new<V>(key: Option<String>, value: V) -> Self
+    pub(crate) fn new<V>(
+        key: Option<String>,
+        value: V,
+        digest_algorithm: SDJWTDigestAlgorithm,
+    ) -> Self
     where
         V: ToString,
     {
@@ -58,7 +63,7 @@ impl SDJWTDisclosure {
         };
 
         let raw_b64 = base64url_encode(data.as_bytes());
-        let hash = base64_hash(raw_b64.as_bytes());
+        let hash = digest_algorithm.base64_hash(raw_b64.as_bytes());
 
         Self { raw_b64, hash }
     }
@@ -101,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_sdjwt_disclosure_when_key_is_none() {
-        let sdjwt_disclosure = SDJWTDisclosure::new(None, "test");
+        let sdjwt_disclosure = SDJWTDisclosure::new(None, "test", SDJWTDigestAlgorithm::default());
         let decoded_disclosure: String =
             String::from_utf8(base64url_decode(&sdjwt_disclosure.raw_b64).unwrap()).unwrap();
 
@@ -111,7 +116,11 @@ mod tests {
 
     #[test]
     fn test_sdjwt_disclosure_when_key_is_present() {
-        let sdjwt_disclosure = SDJWTDisclosure::new(Some("key".to_string()), "test");
+        let sdjwt_disclosure = SDJWTDisclosure::new(
+            Some("key".to_string()),
+            "test",
+            SDJWTDigestAlgorithm::default(),
+        );
         let decoded =
             String::from_utf8(base64url_decode(&sdjwt_disclosure.raw_b64).unwrap()).unwrap();
 
