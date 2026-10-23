@@ -14,7 +14,6 @@ use lazy_static::lazy_static;
 use rand::prelude::ThreadRng;
 use rand::Rng;
 use serde_json::Value;
-use sha2::Digest;
 #[cfg(feature = "mock_salts")]
 use std::{collections::VecDeque, sync::Mutex};
 
@@ -34,11 +33,7 @@ pub fn set_mock_disclosure_python_spacing(enabled: bool) {
 
 #[doc(hidden)]
 pub fn base64_hash(data: &[u8]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-
-    general_purpose::URL_SAFE_NO_PAD.encode(hash)
+    crate::digest::SDJWTDigestAlgorithm::default().base64_hash(data)
 }
 
 pub(crate) fn base64url_encode(data: &[u8]) -> String {

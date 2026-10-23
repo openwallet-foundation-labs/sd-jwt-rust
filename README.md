@@ -126,6 +126,27 @@ duplicated in transit. To require specific signers, let your
 both the protected and the unprotected header, `crit`, or `disclosures`
 outside the first signature — is rejected under every policy.
 
+### Digest algorithms
+
+Issuers use SHA-256 for disclosure and decoy digests by default. To issue an
+SD-JWT with another supported algorithm, configure the issuer before calling
+`issue_sd_jwt`:
+
+```rust
+let mut issuer = SDJWTIssuer::new(issuer_signer)
+    .with_digest_algorithm(SDJWTDigestAlgorithm::Sha384);
+let sd_jwt = issuer.issue_sd_jwt(claims, ClaimsForSelectiveDisclosureStrategy::AllLevels, holder_jwk, add_decoy, SDJWTSerializationFormat::Compact).unwrap();
+```
+
+`SDJWTDigestAlgorithm` supports `Sha256`, `Sha384`, and `Sha512`, corresponding to
+the case-sensitive top-level `_sd_alg` values `sha-256`, `sha-384`, and
+`sha-512`. Holders and verifiers read the algorithm from the Issuer-signed
+payload and use it for disclosure digests and the Key Binding JWT's `sd_hash`.
+When `_sd_alg` is absent, they use SHA-256 as required by
+[RFC 9901 §4.1.1](https://www.rfc-editor.org/rfc/rfc9901.html#section-4.1.1).
+The digest algorithm is independent of the JWS signature algorithm (`alg`,
+such as `ES256`), which is selected by the signer.
+
 ## Repository structure
 
 ### SD-JWT Rust crate

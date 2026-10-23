@@ -10,23 +10,24 @@ use std::collections::VecDeque;
 use std::vec::Vec;
 
 use jsonwebtoken::jwk::Jwk;
-use rand::Rng;
 use serde_json::Value;
 use serde_json::{json, Map as SJMap, Map};
 
 use crate::crypto_provider::{self, SDJWTSigner};
+use crate::digest::SDJWTDigestAlgorithm;
 use crate::disclosure::SDJWTDisclosure;
 use crate::error::Error;
-use crate::utils::{base64_hash, base64url_encode, generate_salt};
+use crate::utils::{base64url_encode, generate_salt};
 use crate::{
     SDJWTCommon, SDJWTSerializationFormat, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
-    DEFAULT_DIGEST_ALG, DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
+    DIGEST_ALG_KEY, JWK_KEY, SD_DIGESTS_KEY, SD_LIST_PREFIX,
 };
 
 pub struct SDJWTIssuer {
     // parameters
     add_decoy_claims: bool,
     typ: Option<String>,
+    digest_algorithm: SDJWTDigestAlgorithm,
 
     // input data
     signer: Box<dyn SDJWTSigner>,
@@ -126,6 +127,7 @@ impl SDJWTIssuer {
         SDJWTIssuer {
             add_decoy_claims: false,
             typ: None,
+            digest_algorithm: SDJWTDigestAlgorithm::default(),
             signer,
             holder_key: None,
             inner: Default::default(),
@@ -141,6 +143,11 @@ impl SDJWTIssuer {
     /// on every co-signature. No `typ` by default.
     pub fn with_typ(mut self, typ: &str) -> Self {
         self.typ = Some(typ.to_owned());
+        self
+    }
+
+    pub fn with_digest_algorithm(mut self, digest_algorithm: SDJWTDigestAlgorithm) -> Self {
+        self.digest_algorithm = digest_algorithm;
         self
     }
 
@@ -256,8 +263,8 @@ impl SDJWTIssuer {
 
         self.sd_jwt_payload.insert(
             DIGEST_ALG_KEY.to_owned(),
-            Value::String(DEFAULT_DIGEST_ALG.to_owned()),
-        ); //TODO
+            Value::String(self.digest_algorithm.name().to_owned()),
+        );
         self.sd_jwt_payload.append(&mut always_revealed_claims);
 
         if let Some(holder_key) = &self.holder_key {
@@ -293,7 +300,7 @@ impl SDJWTIssuer {
             let subtree = self.create_sd_claims(object, strategy_for_child);
 
             if sd_strategy.sd_for_key(&key) {
-                let disclosure = SDJWTDisclosure::new(None, subtree);
+                let disclosure = SDJWTDisclosure::new(None, subtree, self.digest_algorithm);
                 claims.push(json!({ SD_LIST_PREFIX: disclosure.hash}));
                 self.all_disclosures.push(disclosure);
             } else {
@@ -320,7 +327,11 @@ impl SDJWTIssuer {
             let subtree_from_here = self.create_sd_claims(value, strategy_for_child);
 
             if sd_strategy.sd_for_key(key) {
-                let disclosure = SDJWTDisclosure::new(Some(key.to_owned()), subtree_from_here);
+                let disclosure = SDJWTDisclosure::new(
+                    Some(key.to_owned()),
+                    subtree_from_here,
+                    self.digest_algorithm,
+                );
                 sd_claims.push(disclosure.hash.clone());
                 self.all_disclosures.push(disclosure);
             } else {
@@ -422,8 +433,8 @@ impl SDJWTIssuer {
     }
 
     fn create_decoy_claim_entry(&mut self) -> String {
-        let digest = base64_hash(generate_salt().as_bytes()).to_string();
-        digest
+        self.digest_algorithm
+            .base64_hash(generate_salt().as_bytes())
     }
 }
 
@@ -432,9 +443,11 @@ mod tests {
     use jsonwebtoken::EncodingKey;
     use log::trace;
     use serde_json::json;
+    use sha2::{Digest, Sha256, Sha384, Sha512};
 
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
-    use crate::{SDJWTIssuer, SDJWTSerializationFormat};
+    use crate::utils::{base64url_decode, base64url_encode, jwt_payload_decode};
+    use crate::{SDJWTDigestAlgorithm, SDJWTIssuer, SDJWTSerializationFormat};
 
     const PRIVATE_ISSUER_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUr2bNKuBPOrAaxsR\nnbSH6hIhmNTxSGXshDSUD1a1y7ihRANCAARvbx3gzBkyPDz7TQIbjF+ef1IsxUwz\nX1KWpmlVv+421F7+c1sLqGk4HUuoVeN8iOoAcE547pJhUEJyf5Asc6pP\n-----END PRIVATE KEY-----\n";
 
@@ -546,6 +559,91 @@ mod tests {
                 "region",
                 "country"
             ])
+        );
+    }
+
+    #[test]
+    fn issue_with_selected_digest_algorithm() {
+        for algorithm in [
+            SDJWTDigestAlgorithm::Sha256,
+            SDJWTDigestAlgorithm::Sha384,
+            SDJWTDigestAlgorithm::Sha512,
+        ] {
+            let signer = crate::SDJWTSignerBuiltin::new(crate::SDJWTKeyWithAlg::new(
+                EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap(),
+                crate::DEFAULT_SIGNING_ALG,
+            ))
+            .unwrap();
+            let sd_jwt = SDJWTIssuer::new(Box::new(signer))
+                .with_digest_algorithm(algorithm)
+                .issue_sd_jwt(
+                    json!({"email": "alice@example.com", "nationalities": ["DE"]}),
+                    ClaimsForSelectiveDisclosureStrategy::Custom(vec![
+                        "$.email",
+                        "$.nationalities[0]",
+                    ]),
+                    None,
+                    true,
+                    SDJWTSerializationFormat::Compact,
+                )
+                .unwrap();
+            let parts: Vec<_> = sd_jwt.split('~').collect();
+            assert_eq!(parts.len(), 4);
+            let payload = jwt_payload_decode(parts[0].split('.').nth(1).unwrap()).unwrap();
+            assert_eq!(payload["_sd_alg"], algorithm.name());
+
+            let mut digest_len = 0;
+            for disclosure in &parts[1..3] {
+                let decoded: serde_json::Value =
+                    serde_json::from_slice(&base64url_decode(disclosure).unwrap()).unwrap();
+                let digest = match algorithm {
+                    SDJWTDigestAlgorithm::Sha256 => Sha256::digest(disclosure.as_bytes()).to_vec(),
+                    SDJWTDigestAlgorithm::Sha384 => Sha384::digest(disclosure.as_bytes()).to_vec(),
+                    SDJWTDigestAlgorithm::Sha512 => Sha512::digest(disclosure.as_bytes()).to_vec(),
+                };
+                digest_len = digest.len();
+                let expected = base64url_encode(&digest);
+                if decoded.as_array().unwrap().len() == 3 {
+                    assert_eq!(decoded[1], "email");
+                    assert!(payload["_sd"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(expected)));
+                } else {
+                    assert_eq!(decoded[1], "DE");
+                    assert_eq!(payload["nationalities"][0]["..."], expected);
+                }
+            }
+            let sd_digests = payload["_sd"].as_array().unwrap();
+            assert!(sd_digests.len() > 1, "expected decoy digests");
+            assert!(sd_digests.iter().all(|entry| {
+                base64url_decode(entry.as_str().unwrap()).unwrap().len() == digest_len
+            }));
+        }
+    }
+
+    #[test]
+    fn issue_with_default_sha256_digest() {
+        let signer = crate::SDJWTSignerBuiltin::new(crate::SDJWTKeyWithAlg::new(
+            EncodingKey::from_ec_pem(PRIVATE_ISSUER_PEM.as_bytes()).unwrap(),
+            crate::DEFAULT_SIGNING_ALG,
+        ))
+        .unwrap();
+        let sd_jwt = SDJWTIssuer::new(Box::new(signer))
+            .issue_sd_jwt(
+                json!({"email": "alice@example.com"}),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+        let (jwt, disclosure) = sd_jwt.split_once('~').unwrap();
+        let payload = jwt_payload_decode(jwt.split('.').nth(1).unwrap()).unwrap();
+        assert_eq!(payload["_sd_alg"], crate::DEFAULT_DIGEST_ALG);
+        assert_eq!(
+            payload["_sd"][0],
+            base64url_encode(&Sha256::digest(disclosure.trim_end_matches('~').as_bytes()))
         );
     }
 }

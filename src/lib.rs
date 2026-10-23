@@ -4,8 +4,8 @@
 
 use crate::error::Error;
 use crate::utils::{
-    base64_hash, base64_standard_decode, base64_standard_encode, base64url_decode,
-    jwt_payload_decode, now_seconds, numeric_date,
+    base64_standard_decode, base64_standard_encode, base64url_decode, jwt_payload_decode,
+    now_seconds, numeric_date,
 };
 
 use error::Result;
@@ -18,6 +18,7 @@ pub use {
         SDJWTKeyRequest, SDJWTKeyWithAlg, SDJWTSignatureRole, SDJWTSignatureVerifier,
         SDJWTSignatureVerifierBuiltin, SDJWTSigner, SDJWTSignerBuiltin, SDJWTSignerHeader,
     },
+    digest::SDJWTDigestAlgorithm,
     holder::SDJWTHolder,
     issuer::ClaimsForSelectiveDisclosureStrategy,
     issuer::SDJWTIssuer,
@@ -25,6 +26,7 @@ pub use {
 };
 
 pub mod crypto_provider;
+mod digest;
 mod disclosure;
 pub mod error;
 pub mod holder;
@@ -190,6 +192,7 @@ pub(crate) struct SDJWTCommon {
     hash_to_decoded_disclosure: HashMap<String, Value>,
     hash_to_disclosure: HashMap<String, String>,
     input_disclosures: Vec<String>,
+    digest_algorithm: SDJWTDigestAlgorithm,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
@@ -444,6 +447,19 @@ impl SDJWTCommon {
         Ok(())
     }
 
+    fn set_digest_algorithm(&mut self, payload: &Map<String, Value>) -> Result<()> {
+        self.digest_algorithm = match payload.get(DIGEST_ALG_KEY) {
+            None => SDJWTDigestAlgorithm::default(),
+            Some(Value::String(name)) => SDJWTDigestAlgorithm::from_name(name)?,
+            Some(_) => {
+                return Err(Error::InvalidInput(
+                    "`_sd_alg` must be a string".to_string(),
+                ))
+            }
+        };
+        Ok(())
+    }
+
     fn create_hash_mappings(&mut self) -> Result<()> {
         self.hash_to_decoded_disclosure = HashMap::new();
         self.hash_to_disclosure = HashMap::new();
@@ -463,7 +479,7 @@ impl SDJWTCommon {
                     ))
                 })?;
 
-            let hash = base64_hash(disclosure.as_bytes());
+            let hash = self.digest_algorithm.base64_hash(disclosure.as_bytes());
             if self.hash_to_decoded_disclosure.contains_key(&hash) {
                 return Err(Error::DuplicateDigestError(hash));
             }
