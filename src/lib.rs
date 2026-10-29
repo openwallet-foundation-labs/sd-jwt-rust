@@ -26,7 +26,7 @@ pub use {
 };
 
 pub mod crypto_provider;
-mod digest;
+pub mod digest;
 mod disclosure;
 pub mod error;
 pub mod holder;
