@@ -281,12 +281,6 @@ impl SDJWTVerifier {
     }
 
     fn unpack_disclosed_claims_in_array(&mut self, arr: &Vec<Value>) -> Result<Value> {
-        if arr.is_empty() {
-            return Err(Error::InvalidArrayDisclosureObject(
-                "Array of disclosed claims cannot be empty".to_string(),
-            ));
-        }
-
         let mut claims = vec![];
         for value in arr {
             match value {
@@ -906,6 +900,51 @@ mod tests {
         );
 
         assert_eq!(verified_claims, expected_verified_claims);
+    }
+
+    #[test]
+    fn verify_presentation_with_empty_arrays() {
+        let user_claims = json!(
+            {
+                "iss": "https://example.com/issuer",
+                "iat": 1683000000,
+                "exp": 1883000000,
+                "nationalities": [],
+                "address": {
+                    "street_address": "Schulstr. 12",
+                    "aliases": []
+                }
+            }
+        );
+        let strategy = ClaimsForSelectiveDisclosureStrategy::Custom(vec!["$.address"]);
+        let sd_jwt = SDJWTIssuer::new(issuer_signer())
+            .issue_sd_jwt(
+                user_claims.clone(),
+                strategy,
+                None,
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+
+        let claims_to_disclose = json!({"address": true});
+
+        let presentation = SDJWTHolder::new_unverified(sd_jwt, SDJWTSerializationFormat::Compact)
+            .unwrap()
+            .create_presentation(claims_to_disclose.as_object().unwrap().clone(), None, None)
+            .unwrap();
+
+        let verified_claims = SDJWTVerifier::new(
+            verifier_signature_verifier(),
+            presentation,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .verified_claims;
+
+        assert_eq!(verified_claims, user_claims);
     }
 
     #[test]
