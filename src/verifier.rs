@@ -13,10 +13,10 @@ use std::string::String;
 use std::vec::Vec;
 
 use crate::crypto_provider::{SDJWTKeyRequest, SDJWTSignatureRole, SDJWTSignatureVerifier};
-use crate::utils::{base64_hash, now_seconds, numeric_date};
+use crate::utils::{now_seconds, numeric_date};
 use crate::{
-    SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DEFAULT_DIGEST_ALG,
-    DIGEST_ALG_KEY, JWK_KEY, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY, SD_LIST_PREFIX,
+    SDJWTCommon, CNF_KEY, COMBINED_SERIALIZATION_FORMAT_SEPARATOR, DIGEST_ALG_KEY, JWK_KEY,
+    KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY, SD_LIST_PREFIX,
 };
 
 /// RFC 7519 `aud` matching: the token's `aud` may be a single string or an
@@ -107,10 +107,13 @@ impl SDJWTVerifier {
         };
 
         verifier.sd_jwt_engine.parse_sd_jwt(sd_jwt_presentation)?;
-        verifier.sd_jwt_engine.create_hash_mappings()?;
         verifier.sd_jwt_payload = verifier
             .sd_jwt_engine
             .process_issuer_jwt(Some(verifier.signature_verifier.as_ref()), signature_policy)?;
+        verifier
+            .sd_jwt_engine
+            .set_digest_algorithm(&verifier.sd_jwt_payload)?;
+        verifier.sd_jwt_engine.create_hash_mappings()?;
         verifier.holder_public_key_payload = verifier
             .sd_jwt_payload
             .get(CNF_KEY)
@@ -212,19 +215,13 @@ impl SDJWTVerifier {
             .join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             .add(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
 
-        Ok(base64_hash(combined.as_bytes()))
+        Ok(self
+            .sd_jwt_engine
+            .digest_algorithm
+            .base64_hash(combined.as_bytes()))
     }
 
     fn extract_sd_claims(&mut self) -> Result<Value> {
-        if self.sd_jwt_payload.contains_key(DIGEST_ALG_KEY)
-            && self.sd_jwt_payload[DIGEST_ALG_KEY] != DEFAULT_DIGEST_ALG
-        {
-            return Err(Error::DeserializationError(format!(
-                "Invalid hash algorithm {}",
-                self.sd_jwt_payload[DIGEST_ALG_KEY]
-            )));
-        }
-
         for (key, value) in self.sd_jwt_payload.iter() {
             if key == DIGEST_ALG_KEY {
                 continue;
@@ -426,8 +423,8 @@ mod tests {
     use crate::issuer::ClaimsForSelectiveDisclosureStrategy;
     use crate::utils::{base64url_decode, base64url_encode};
     use crate::{
-        SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTHolder, SDJWTIssuer, SDJWTSerializationFormat,
-        SDJWTVerifier, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
+        SDJWTDigestAlgorithm, SDJWTFlattenedJson, SDJWTGeneralJson, SDJWTHolder, SDJWTIssuer,
+        SDJWTSerializationFormat, SDJWTVerifier, COMBINED_SERIALIZATION_FORMAT_SEPARATOR,
     };
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
     use rstest::rstest;
@@ -1890,5 +1887,184 @@ mod tests {
             result.is_err(),
             "verifier accepted a malformed (non-2-element) array-element Disclosure",
         );
+    }
+
+    #[test]
+    fn verify_non_default_digests_with_key_binding_in_all_formats() {
+        for algorithm in [SDJWTDigestAlgorithm::Sha384, SDJWTDigestAlgorithm::Sha512] {
+            for format in [
+                SDJWTSerializationFormat::Compact,
+                SDJWTSerializationFormat::FlattenedJson,
+                SDJWTSerializationFormat::GeneralJson,
+            ] {
+                let holder_jwk = serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap();
+                let sd_jwt = SDJWTIssuer::new(issuer_signer())
+                    .with_digest_algorithm(algorithm)
+                    .issue_sd_jwt(
+                        json!({"iss": "https://issuer.example", "email": "alice@example.com", "nationalities": ["DE", "FR"]}),
+                        ClaimsForSelectiveDisclosureStrategy::Custom(vec![
+                            "$.email",
+                            "$.nationalities[0]",
+                            "$.nationalities[1]",
+                        ]),
+                        Some(holder_jwk),
+                        true,
+                        format.clone(),
+                    )
+                    .unwrap();
+                let presentation = SDJWTHolder::new(
+                    holder_verifier(),
+                    Some(holder_kb_signer()),
+                    sd_jwt,
+                    format.clone(),
+                )
+                .unwrap()
+                .create_presentation(
+                    json!({"email": true, "nationalities": [false, true]})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    Some("nonce".to_string()),
+                    Some("audience".to_string()),
+                )
+                .unwrap();
+
+                let claims = SDJWTVerifier::new(
+                    verifier_signature_verifier(),
+                    presentation,
+                    Some("audience".to_string()),
+                    Some("nonce".to_string()),
+                    format.clone(),
+                )
+                .unwrap()
+                .verified_claims;
+                assert_eq!(claims["email"], "alice@example.com");
+                assert_eq!(claims["nationalities"], json!(["FR"]));
+                assert!(claims.get("_sd_alg").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn reject_invalid_digest_algorithms() {
+        for sd_alg in [json!("SHA-256"), json!("sha-1"), json!(null), json!(384)] {
+            let payload = json!({"iss": "https://issuer.example", "_sd_alg": sd_alg});
+            let signed = jsonwebtoken::encode(
+                &Header::new(Algorithm::ES256),
+                &payload,
+                &es256_signing_key(),
+            )
+            .unwrap();
+            let sd_jwt = format!("{signed}~");
+            assert!(SDJWTHolder::new(
+                holder_verifier(),
+                None,
+                sd_jwt.clone(),
+                SDJWTSerializationFormat::Compact,
+            )
+            .is_err());
+            assert!(SDJWTVerifier::new(
+                verifier_signature_verifier(),
+                sd_jwt,
+                None,
+                None,
+                SDJWTSerializationFormat::Compact,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn verify_missing_digest_algorithm_as_sha256() {
+        use crate::utils::base64_hash;
+        let disclosure = base64url_encode(br#"["salt", "email", "alice@example.com"]"#);
+        let payload = json!({"_sd": [base64_hash(disclosure.as_bytes())]});
+        let signed = jsonwebtoken::encode(
+            &Header::new(Algorithm::ES256),
+            &payload,
+            &es256_signing_key(),
+        )
+        .unwrap();
+        let sd_jwt = format!("{signed}~{disclosure}~");
+        let presentation = SDJWTHolder::new(
+            holder_verifier(),
+            None,
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .create_presentation(
+            json!({"email": true}).as_object().unwrap().clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        let claims = SDJWTVerifier::new(
+            verifier_signature_verifier(),
+            presentation,
+            None,
+            None,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .verified_claims;
+        assert_eq!(claims["email"], "alice@example.com");
+    }
+
+    #[test]
+    fn reject_key_binding_hash_with_wrong_digest_algorithm() {
+        use sha2::{Digest, Sha256, Sha512};
+
+        let sd_jwt = SDJWTIssuer::new(issuer_signer())
+            .with_digest_algorithm(SDJWTDigestAlgorithm::Sha512)
+            .issue_sd_jwt(
+                json!({"email": "alice@example.com"}),
+                ClaimsForSelectiveDisclosureStrategy::AllLevels,
+                Some(serde_json::from_str(HOLDER_JWK_KEY_ED25519).unwrap()),
+                false,
+                SDJWTSerializationFormat::Compact,
+            )
+            .unwrap();
+        let presentation = SDJWTHolder::new(
+            holder_verifier(),
+            Some(holder_kb_signer()),
+            sd_jwt,
+            SDJWTSerializationFormat::Compact,
+        )
+        .unwrap()
+        .create_presentation(
+            json!({"email": true}).as_object().unwrap().clone(),
+            Some("nonce".to_string()),
+            Some("audience".to_string()),
+        )
+        .unwrap();
+
+        let (sd_jwt_part, kb_jwt) = presentation.rsplit_once('~').unwrap();
+        let sd_jwt_part = format!("{sd_jwt_part}~");
+        let mut kb_payload =
+            crate::utils::jwt_payload_decode(kb_jwt.split('.').nth(1).unwrap()).unwrap();
+        assert_eq!(
+            kb_payload["sd_hash"],
+            base64url_encode(&Sha512::digest(sd_jwt_part.as_bytes()))
+        );
+        kb_payload.insert(
+            "sd_hash".to_owned(),
+            json!(base64url_encode(&Sha256::digest(sd_jwt_part.as_bytes()))),
+        );
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("kb+jwt".to_owned());
+        let wrong_kb_jwt =
+            jsonwebtoken::encode(&header, &kb_payload, &holder_ed25519_signing_key()).unwrap();
+        let wrong_presentation = format!("{sd_jwt_part}{wrong_kb_jwt}");
+        let err = SDJWTVerifier::new(
+            verifier_signature_verifier(),
+            wrong_presentation,
+            Some("audience".to_string()),
+            Some("nonce".to_string()),
+            SDJWTSerializationFormat::Compact,
+        )
+        .err()
+        .expect("SHA-256 sd_hash must be rejected for a SHA-512 SD-JWT");
+        assert!(err.to_string().contains("Invalid digest in KB-JWT"));
     }
 }

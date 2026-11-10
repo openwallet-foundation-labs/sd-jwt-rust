@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ops::Add;
 
 use crate::crypto_provider::{self, SDJWTSignatureVerifier, SDJWTSigner};
-use crate::utils::{base64_hash, now_seconds};
+use crate::utils::now_seconds;
 use crate::SDJWTCommon;
 use crate::{
     COMBINED_SERIALIZATION_FORMAT_SEPARATOR, KB_DIGEST_KEY, KB_JWT_TYP_HEADER, SD_DIGESTS_KEY,
@@ -155,6 +155,9 @@ impl SDJWTHolder {
         holder.sd_jwt_payload = holder
             .sd_jwt_engine
             .process_issuer_jwt(holder.signature_verifier.as_deref(), signature_policy)?;
+        holder
+            .sd_jwt_engine
+            .set_digest_algorithm(&holder.sd_jwt_payload)?;
         holder.serialized_sd_jwt = holder
             .sd_jwt_engine
             .unverified_sd_jwt
@@ -416,7 +419,9 @@ impl SDJWTHolder {
         let combined = combined
             .join(COMBINED_SERIALIZATION_FORMAT_SEPARATOR)
             .add(COMBINED_SERIALIZATION_FORMAT_SEPARATOR);
-        base64_hash(combined.as_bytes())
+        self.sd_jwt_engine
+            .digest_algorithm
+            .base64_hash(combined.as_bytes())
     }
 }
 
